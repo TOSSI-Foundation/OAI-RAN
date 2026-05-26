@@ -1,0 +1,15 @@
+[package]
+name = "ue-sim"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ue-sim"
+path = "src/main.rs"
+
+[dependencies]
+clap       = { version = "4",    features = ["derive"] }
+ratatui    = "0.29"
+crossterm  = { version = "0.28", features = ["event-stream"] }
+serde      = { version = "1",    features = ["derive"] }
+serde_json = "1"

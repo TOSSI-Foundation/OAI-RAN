@@ -1,0 +1,8 @@
+dashboard/target/
+proxy/__pycache__/
+config/__pycache__/
+traffic/__pycache__/
+*.pyc
+*.pyo
+*.log
+/tmp/

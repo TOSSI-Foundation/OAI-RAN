@@ -34,3 +34,30 @@ nfapi_nr_interface_scf
 *.log
 *.out
 CMakeUserPresets.json
+
+# cmake build artifacts (binaries, libraries, generated cmake files)
+cmake_targets/CMakeCache.txt
+cmake_targets/CMakeFiles/
+cmake_targets/Makefile
+cmake_targets/cmake_install.cmake
+cmake_targets/cpm-package-lock.cmake
+cmake_targets/*.cmake
+cmake_targets/*.a
+cmake_targets/*.so
+cmake_targets/nr-softmodem
+cmake_targets/nr-uesoftmodem
+cmake_targets/common/
+cmake_targets/doc/
+cmake_targets/executables/
+cmake_targets/nfapi/
+cmake_targets/openair1/
+cmake_targets/openair2/
+cmake_targets/openair3/
+cmake_targets/radio/
+cmake_targets/tests/
+cmake_targets/CPM_modules/
+cmake_targets/CPM.cmake
+
+# other generated/temp files
+gen_revised_plan.py
+temp_diagram/

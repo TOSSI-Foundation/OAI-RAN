@@ -5,6 +5,7 @@ add_library(ring_buffer ring_buffer.cpp)
 add_library(zmq_imported zmq_imported.cpp)
 target_include_directories(zmq_imported PUBLIC ./)
 target_link_libraries(zmq_imported PUBLIC ${zmq_LIBRARIES} log_headers)
+target_compile_features(zmq_imported PUBLIC cxx_std_17)
 
 target_include_directories(ring_buffer PUBLIC ./)
 add_library(oai_zmqdevif SHARED zmq_radio.cpp)

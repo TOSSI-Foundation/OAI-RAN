@@ -1,112 +1,57 @@
-<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+# Multi-UE Simulation
 
-<h1 align="center">
-    <a href="https://openairinterface.org/"><img src="https://openairinterface.org/wp-content/uploads/2015/06/cropped-oai_final_logo.png" alt="OAI" width="550"></a>
-</h1>
+A self-contained harness for the **OCUDU RAN Stack** that runs **N OAI `nr-uesoftmodem` instances** against a single gNB over ZMQ, each UE isolated in its own Linux network namespace, driven by a Rust terminal dashboard.
 
-<p align="center">
-    <a href="https://gitlab.eurecom.fr/oai/openairinterface5g/-/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-CSSL--v1.0-blue" alt="License"></a>
-    <a href="https://releases.ubuntu.com/22.04/"><img src="https://img.shields.io/badge/OS-Ubuntu22-Green" alt="Supported OS Ubuntu 22"></a>
-    <a href="https://releases.ubuntu.com/24.04/"><img src="https://img.shields.io/badge/OS-Ubuntu24-Green" alt="Supported OS Ubuntu 24"></a>
-    <a href="https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux"><img src="https://img.shields.io/badge/OS-RHEL9-Green" alt="Supported OS RHEL9"></a>
-    <a href="https://getfedora.org/en/workstation/"><img src="https://img.shields.io/badge/OS-Fedore41-Green" alt="Supported OS Fedora 43"></a>
-</p>
+## Architecture
 
-<p align="center">
-    <a href="https://gitlab.eurecom.fr/oai/openairinterface5g/-/releases"><img alt="GitLab Release (custom instance)" src="https://img.shields.io/gitlab/v/release/oai/openairinterface5g?gitlab_url=https%3A%2F%2Fgitlab.eurecom.fr&include_prereleases&sort=semver"></a>
-</p>
+![Architecture](multi_ue_sim/docs/architecture_diagram.png)
 
-<p align="center">
-    <a href="https://jenkins-oai.eurecom.fr/job/RAN-Ubuntu18-Image-Builder/"><img src="https://img.shields.io/jenkins/build?jobUrl=https%3A%2F%2Fjenkins-oai.eurecom.fr%2Fjob%2FRAN-Ubuntu18-Image-Builder%2F&label=build-Ubuntu-x86%20Images"></a>
-    <a href="https://jenkins-oai.eurecom.fr/job/RAN-RHEL8-Cluster-Image-Builder/"><img src="https://img.shields.io/jenkins/build?jobUrl=https%3A%2F%2Fjenkins-oai.eurecom.fr%2Fjob%2FRAN-RHEL8-Cluster-Image-Builder%2F&label=build-UBI-x86%20Images"></a>
-    <a href="https://jenkins-oai.eurecom.fr/job/RAN-Ubuntu-ARM-Image-Builder/"><img src="https://img.shields.io/jenkins/build?jobUrl=https%3A%2F%2Fjenkins-oai.eurecom.fr%2Fjob%2FRAN-Ubuntu-ARM-Image-Builder%2F&label=build-Ubuntu-ARM%20Images"></a>
-</p>
+## Per-UE lifecycle
 
-<p align="center">
-  <a href="https://hub.docker.com/r/oaisoftwarealliance/oai-gnb"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/oaisoftwarealliance/oai-gnb?label=gNB%20docker%20pulls"></a>
-  <a href="https://hub.docker.com/r/oaisoftwarealliance/oai-nr-ue"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/oaisoftwarealliance/oai-nr-ue?label=NR-UE%20docker%20pulls"></a>
-  <a href="https://hub.docker.com/r/oaisoftwarealliance/oai-enb"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/oaisoftwarealliance/oai-enb?label=eNB%20docker%20pulls"></a>
-  <a href="https://hub.docker.com/r/oaisoftwarealliance/oai-lte-ue"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/oaisoftwarealliance/oai-lte-ue?label=LTE-UE%20docker%20pulls"></a>
-  <a href="https://hub.docker.com/r/oaisoftwarealliance/oai-nr-cuup"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/oaisoftwarealliance/oai-nr-cuup?label=NR-CUUP%20docker%20pulls"></a>
-</p>
+![Per-UE lifecycle](multi_ue_sim/docs/per_ue_lifecycle.png)
 
-# OpenAirInterface License #
+## What's in here
 
- *  [OAI License Model](http://www.openairinterface.org/?page_id=101)
- *  [CSSL v1.0](http://www.openairinterface.org/?page_id=698)
+| Path | Purpose |
+|---|---|
+| `multi_ue_sim/proxy/zmq_proxy.py` | Single-thread ZMQ DL/UL proxy multiplexing one gNB onto N UEs (lockstep, backpressure, wave admission, live-add) |
+| `multi_ue_sim/dashboard/` | `ue-sim` Rust CLI + ratatui TUI (start/stop/status/traffic/logs/monitor) |
+| `multi_ue_sim/traffic/ue_traffic.py` | Per-UE traffic engine (idle / speedtest / video / gaming) |
+| `multi_ue_sim/run_nue.sh` | Provisions netns + veth pairs, launches proxy and N UEs |
+| `multi_ue_sim/clean_start.sh` | End-to-end: kill leftovers → CU → DU → UEs |
+| `multi_ue_sim/mue_add.sh` | Hot-add a UE at runtime |
+| `multi_ue_sim/provision_subscribers.sh` | Bulk-insert IMSIs into the 5GC `oai_db` |
+| `multi_ue_sim/config/gen_ue_config.py` | Generate multi-UICC OAI UE config |
 
-The source code is distributed under [**CSSL v1.0**](LICENSE).
-Some files, such as for orchestration, are distributed under
-[MIT license](preferred)(MIT.txt). Documentation is distributed under
-[Creative Commons Attribution 4.0 International license](LICENSES/preferred/CC-BY-4.0.txt).
+## Quick start
 
-All the files without an explicit copyright header have an implicit "Copyright
-of OpenAirInterface Authors".
+```bash
+# 1. Build the dashboard
+cd multi_ue_sim/dashboard && cargo build --release && cd -
 
-Please see [NOTICE](NOTICE) for other licenses which are used in the software.
+# 2. Provision N subscribers in the 5GC (once)
+bash multi_ue_sim/provision_subscribers.sh 10
 
-In the past OAI source code has been re-licensed sometimes, here is the
-history:
+# 3. Start gNB + N UEs in one shot
+sudo bash multi_ue_sim/clean_start.sh 10
 
-1. CSSL v1.0 starting tag 2026.w14
-2. OAI Public License v1.1 starting tag v1.0 till af4b0d53
-3. OAI Public License v1.0: starting tag v.04 till v1.0
-4. GPL 3: starting tag v.0 till v.04 (only initial implementation of 4G)
+# 4. Open the dashboard
+sudo ./multi_ue_sim/dashboard/target/release/ue-sim monitor
 
-# Where to Start #
-
- *  [General overview of documentation](./doc/README.md)
- *  [The implemented features](./doc/FEATURE_SET.md)
- *  [System Requirements for Using OAI Stack](./doc/system_requirements.md)
- *  [How to build](./doc/BUILD.md)
- *  [How to run the modems](./doc/RUNMODEM.md)
-
-Not all information is available in a central place, and information for
-specific sub-systems might be available in the corresponding sub-directories.
-To find all READMEs, this command might be handy:
-
-```
-find . -iname "readme*"
+# Stop everything
+sudo bash multi_ue_sim/run_nue.sh 10 --stop
 ```
 
-# RAN repository structure #
+## Requirements
 
-The OpenAirInterface (OAI) software is composed of the following parts: 
+- OAI `nr-uesoftmodem` built at `cmake_targets/nr-uesoftmodem`
+- A gNB (OCUDU split or monolithic) reachable on ZMQ `tcp://127.0.0.1:4556` / `:4557`
+- OAI 5G Core with the `mysql` container running
+- Python 3 with `pyzmq` and `numpy`
+- Root access (for network namespaces and `iptables`)
+- Rust toolchain (for building the dashboard)
 
-```
-openairinterface5g
-├── charts
-├── ci-scripts        : Meta-scripts used by the OSA CI process. Contains also configuration files used day-to-day by CI.
-├── CMakeLists.txt    : Top-level CMakeLists.txt for building
-├── cmake_targets     : Build utilities to compile (simulation, emulation and real-time platforms), and generated build files.
-├── common            : Some common OAI utilities, some other tools can be found at openair2/UTILS.
-├── doc               : Documentation
-├── docker            : Dockerfiles to build for Ubuntu and RHEL
-├── executables       : Top-level executable source files (gNB, eNB, ...)
-├── maketags          : Script to generate emacs tags.
-├── nfapi             : (n)FAPI code for MAC-PHY interface
-├── openair1          : Layer 1 (3GPP LTE Rel-10/12 PHY, NR Rel-15 PHY)
-├── openair2          : Layer 2 (3GPP LTE Rel-10 MAC/RLC/PDCP/RRC/X2AP, LTE Rel-14 M2AP, NR Rel-15+ MAC/RLC/PDCP/SDAP/RRC/X2AP/F1AP/E1AP), E2AP
-├── openair3          : Layer 3 (3GPP LTE Rel-10 S1AP/GTP, NR Rel-15 NGAP/GTP)
-├── openshift         : OpenShift helm charts for some deployment options of OAI
-├── radio             : Drivers for various radios such as USRP, AW2S, RFsim, 7.2 FHI, ...
-├── targets           : Some configuration files; only historical relevance, and might be deleted in the future
-└── tools             : Tools for use by the developers/ci machines: code analysis and formatting
-```
+## Documentation
 
-# How to get support from the OAI Community # 
-
-You can ask your question on the [mailing lists](https://gitlab.eurecom.fr/oai/openairinterface5g/-/wikis/MailingList).
-
-Your email should contain below information:
-
-- A clear subject in your email.
-- For all the queries there should be [Query\] in the subject of the email and for problems there should be [Problem\].
-- In case of a problem, add a small description.
-- Do not share any photos unless you want to share a diagram.
-- OAI gNB/DU/CU/CU-CP/CU-UP configuration file in `.conf` format only.
-- Logs of OAI gNB/DU/CU/CU-CP/CU-UP in `.log` or `.txt` format only.
-- In case your question is related to performance, include a small description of the machine (Operating System, Kernel version, CPU, RAM and networking card) and diagram of your testing environment.
-- Known/open issues are present on [GitLab](https://gitlab.eurecom.fr/oai/openairinterface5g/-/issues), so keep checking.
-
-Always remember a structured email will help us understand your issues quickly.
+- **Dashboard user guide:** [`multi_ue_sim/docs/DASHBOARD_GUIDE.md`](multi_ue_sim/docs/DASHBOARD_GUIDE.md)
+- **Full documentation:** <https://docs.ocuduindia.org/docs/multi-ue-sim/>

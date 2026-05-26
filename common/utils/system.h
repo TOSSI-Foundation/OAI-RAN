@@ -7,6 +7,8 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <sched.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,7 +36,18 @@ void threadCreate(pthread_t *t, void *(*func)(void *), void *param, char *name, 
 #define SCHED_OAI SCHED_RR
 #define OAI_PRIORITY_RT_LOW sched_get_priority_min(SCHED_OAI)
 #define OAI_PRIORITY_RT ((sched_get_priority_min(SCHED_OAI)+sched_get_priority_max(SCHED_OAI))/2)
-#define OAI_PRIORITY_RT_MAX sched_get_priority_max(SCHED_OAI)-2
+
+static inline int oai_priority_rt_max(void)
+{
+  const char *e = getenv("OAI_RT_PRIO_MAX");
+  if (e != NULL) {
+    int v = atoi(e);
+    if (v >= sched_get_priority_min(SCHED_OAI) && v <= sched_get_priority_max(SCHED_OAI) - 2)
+      return v;
+  }
+  return sched_get_priority_max(SCHED_OAI) - 2;
+}
+#define OAI_PRIORITY_RT_MAX (oai_priority_rt_max())
 
 void thread_top_init(char *thread_name);
 
