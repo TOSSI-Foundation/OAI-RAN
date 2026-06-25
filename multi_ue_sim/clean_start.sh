@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# Copyright 2025-2026 coRAN LABS Private Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,19 +17,35 @@ set -uo pipefail
 
 N="${1:-1}"
 MUE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OCUDU="${OCUDU:-$(realpath "$MUE/../../ocudu_split_release/build/apps" 2>/dev/null || echo "$MUE/../../ocudu_split_release/build/apps")}"
-CONFIGS="${CONFIGS:-$(realpath "$MUE/../../ocudu_split_release/configs" 2>/dev/null || echo "$MUE/../../ocudu_split_release/configs")}"
+# gNB source tree: the OCUDU build that ships ocu + odu. Either set OCUDU_TREE
+# to its root (build/apps and configs/ live under it) or set OCUDU + CONFIGS
+# directly. There is no default — point this at YOUR build tree.
+: "${OCUDU_TREE:?set OCUDU_TREE to your OCUDU build tree root (the one containing build/apps and configs/), or set OCUDU and CONFIGS directly}"
+OCUDU="${OCUDU:-$OCUDU_TREE/build/apps}"
+CONFIGS="${CONFIGS:-$OCUDU_TREE/configs}"
 [[ $EUID -eq 0 ]] || { echo "run as root (sudo)"; exit 1; }
 
 export LD_LIBRARY_PATH="/opt/intel/oneapi/mkl/latest/lib/intel64:/opt/intel/oneapi/compiler/latest/linux/compiler/lib/intel64_lin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# MKL otherwise loads libmkl_intel_thread, which needs Intel's libiomp5 OpenMP
+# runtime (omp_get_num_procs). That isn't a hard dependency of the MKL .so, so
+# merely having libiomp5 on LD_LIBRARY_PATH does NOT load it -> the gNB dies with
+# "undefined symbol: omp_get_num_procs" before writing any log. Force MKL onto the
+# GNU OpenMP (libgomp) that is already linked into ocu/odu. This is the robust fix.
+export MKL_THREADING_LAYER=GNU
 
-GNB_CPUS="${GNB_CPUS:-21-24}"          # gNB (odu+ocu): 4 dedicated cores
-export UE_CPUS="${UE_CPUS:-25-31}"     # proxy + UEs: 7 cores (run_nue reads UE_CPUS)
+# CPU layout. This host isolates cores 0-20 (isolcpus=managed_irq,domain,0-20
+# nohz_full=1-20 rcu_nocbs=0-20) — these are the tickless, IRQ-shielded RT cores.
+# Run the RT RAN there so it is NEVER contended by the IDE/AI agents/5GC, which
+# all live on the non-isolated cores 21-31. Core 0 is isolcpus but NOT nohz_full
+# (carries housekeeping), so leave it out and use 1-20 for the RAN.
+#   gNB (CU+DU): 1-6   proxy+UEs: 7-20   (IDE + 5GC stay on 21-31)
+GNB_CPUS="${GNB_CPUS:-1-6}"            # gNB (odu+ocu) on isolated RT cores
+export UE_CPUS="${UE_CPUS:-7-20}"      # proxy + UEs on isolated RT cores
 GNB_TASKSET=(taskset -c "$GNB_CPUS")
 
 export OCUDU_INJECT_ENABLE="${OCUDU_INJECT_ENABLE:-0}"
 export PROXY_POLL_MS="${PROXY_POLL_MS:-1}"
-echo "=== CPU pin: gNB->$GNB_CPUS  UEs+proxy->$UE_CPUS   latency-injector=$OCUDU_INJECT_ENABLE  proxy-poll=${PROXY_POLL_MS}ms ==="
+echo "=== CPU pin: gNB->$GNB_CPUS  proxy+UEs->$UE_CPUS  (cores 0-20 not usable; 5GC also on 21-31)  latency-injector=$OCUDU_INJECT_ENABLE  proxy-poll=${PROXY_POLL_MS}ms ==="
 
 CELL_BW="${CELL_BW:-$([ "$N" -gt 5 ] && echo 10 || echo 20)}"
 case "$CELL_BW" in

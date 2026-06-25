@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-# Copyright 2025-2026 coRAN LABS Private Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -125,7 +124,7 @@ def main():
     p.add_argument("--rf-freq",    type=int, default=3489420000,
                    help="DL carrier frequency in Hz (default: 3489420000)")
     p.add_argument("--numerology", type=int, default=1)
-    p.add_argument("--n-rb-dl",    type=int, default=106)
+    p.add_argument("--n-rb-dl",    type=int, default=51)
     p.add_argument("--ssb-start",  type=int, default=42)
     p.add_argument("--base-port",  type=int, default=5000,
                    help="ZMQ base port. Host mode: unique pair per UE. NS mode: shared pair, isolated by namespace IP")

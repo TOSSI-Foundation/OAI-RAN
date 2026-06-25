@@ -1,4 +1,3 @@
-// Copyright 2025-2026 coRAN LABS Private Limited
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,6 +10,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// The shared page-context model (slice.rs PageCtx helpers, the G2 validator) and the parked
+// telnet channel-model mobility path intentionally expose more surface than the three live pages
+// currently consume, so a few items read as dead. Silence the noise here rather than per-item.
+#![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -42,6 +46,15 @@ use ratatui::{
     Terminal,
 };
 use serde::Deserialize;
+
+mod slice;
+mod telnet;
+mod configure;
+mod advanced;
+mod handover;
+mod ui;
+
+use slice::{read_slice_map, read_slice_metrics, PageCtx, SliceId, SliceMapEntry, SliceMetric, UeHealth};
 
 const PROXY_STATUS:  &str = "/tmp/multi_ue_proxy_status.json";
 const TRAFFIC_STATUS:&str = "/tmp/multi_ue_traffic_status.json";
@@ -125,6 +138,11 @@ enum Commands {
         num_ues: Option<usize>,
         #[arg(long, default_value = "1000", help = "Refresh interval (ms)")]
         interval_ms: u64,
+    },
+    /// Render the Configure / Advanced pages to a text buffer (offline layout check).
+    RenderTest {
+        #[arg(long, default_value = "both", help = "configure | advanced | both")]
+        page: String,
     },
 }
 
@@ -460,6 +478,51 @@ fn launch_traffic(root: &PathBuf, num_ues: usize, iperf_server: &Option<String>,
     child.id()
 }
 
+// --- CPU pinning helpers (mirror run_nue.sh) --------------------------------
+// UE_CPUS (default "4-20") is the proxy+UE pool. First core => proxy (dedicated),
+// rest split per-UE (CORES_PER_UE). Pins to the isolated RT cores so the proxy
+// is never starved (avoids ZMQ lockstep slip -> RLF). PROXY_CPUS overrides proxy.
+fn pin_pool() -> Vec<usize> {
+    // Host confines processes to cores 21-31; first core => proxy, rest => UEs.
+    let spec = std::env::var("UE_CPUS").unwrap_or_else(|_| "25-31".to_string());
+    let mut all = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() { continue; }
+        if let Some((a, b)) = part.split_once('-') {
+            if let (Ok(a), Ok(b)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>()) {
+                for c in a..=b { all.push(c); }
+            }
+        } else if let Ok(c) = part.parse::<usize>() {
+            all.push(c);
+        }
+    }
+    all
+}
+fn proxy_core_str() -> String {
+    if let Ok(pc) = std::env::var("PROXY_CPUS") { return pc; }
+    pin_pool().first().map(|c| c.to_string()).unwrap_or_else(|| "25".to_string())
+}
+fn ue_cores_str(idx: usize, num_ues: usize) -> String {
+    let pool = pin_pool();
+    let ue_pool: Vec<usize> = if std::env::var("PROXY_CPUS").is_ok() {
+        pool.clone()
+    } else if pool.len() > 1 {
+        pool[1..].to_vec()
+    } else {
+        pool.clone()
+    };
+    if ue_pool.is_empty() { return "25".to_string(); }
+    let per: usize = std::env::var("CORES_PER_UE").ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| std::cmp::max(1, ue_pool.len() / std::cmp::max(1, num_ues)));
+    let start = ((idx - 1) * per) % ue_pool.len();
+    let cores: Vec<String> = (0..per)
+        .map(|k| ue_pool[(start + k) % ue_pool.len()].to_string())
+        .collect();
+    cores.join(",")
+}
+
 fn cmd_start_zmq(
     num_ues: usize, imsi_base: &str, key: &str, opc: &str, dnn: &str,
     gnb_dl: &str, gnb_ul: &str, base_port: u16,
@@ -502,10 +565,12 @@ fn cmd_start_zmq(
             .output();
     }
 
-    println!("[start] launching ZMQ proxy  (ns-prefix={})", NS_PREFIX);
+    let proxy_core = proxy_core_str();
+    println!("[start] launching ZMQ proxy  (ns-prefix={}, cpu={})", NS_PREFIX, proxy_core);
     let plog = fs::File::create(log_proxy()).unwrap();
-    let pchild: Child = Command::new("python3")
-        .args([root.join("proxy/zmq_proxy.py").to_str().unwrap(),
+    let pchild: Child = Command::new("taskset")
+        .args(["-c", &proxy_core, "python3",
+               root.join("proxy/zmq_proxy.py").to_str().unwrap(),
                "--num-ues",     &num_ues.to_string(),
                "--gnb-dl-addr", gnb_dl,
                "--gnb-ul-addr", gnb_ul,
@@ -526,14 +591,15 @@ fn cmd_start_zmq(
         let log_path  = log_nr_ue(i);
         let ns        = ns_name(i);
 
-        println!("[start] launching UE{}  ns={}", i, ns);
+        let ue_core = ue_cores_str(i, num_ues);
+        println!("[start] launching UE{}  ns={}  cpu={}", i, ns, ue_core);
         let ulog = fs::File::create(&log_path).unwrap();
         let ue_child: Child = Command::new("ip")
-            .args(["netns", "exec", &ns,
+            .args(["netns", "exec", &ns, "taskset", "-c", &ue_core,
                    ue_binary.to_str().unwrap(),
                    "-O",            &conf_path,
                    "--device.name", "oai_zmqdevif",
-                   "-r",            "106",
+                   "-r",            "51",
                    "--numerology",  "1",
                    "--band",        "78",
                    "-C",            &dl_freq.to_string()])
@@ -618,7 +684,7 @@ fn cmd_start_rfsim(
                    ue_binary.to_str().unwrap(),
                    "-O", &conf_path,
                    "--rfsim", "--sa",
-                   "-r", "106",
+                   "-r", "51",
                    "--numerology", "1",
                    "--band", "78",
                    "-C", &dl_freq.to_string(),
@@ -1234,46 +1300,56 @@ fn iperf_srv(ext_dn_ip: &str) -> Option<String> {
 
 fn ping_thread(ue: usize, target: String, shared: Shared, stop: Arc<AtomicBool>) {
     let ns = format!("ue{ue}");
-    let mut tun_ip = live_tun_ip(ue);
-    if tun_ip.is_empty() {
-        for _ in 0..20 {
+    // Outer loop: keep this ping alive for the whole session. A UE may reach
+    // DATA LATE (after this thread started) or RE-ATTACH with a new tun IP; the
+    // old code gave up after 20s ("return") and that UE then showed NO RTT on
+    // the dashboard forever even though its data plane worked. Here we instead
+    // wait for the tunnel indefinitely, ping while it's up, and if the ping dies
+    // or the tunnel drops we loop back and wait for it again — so EVERY DATA UE
+    // gets an RTT graph regardless of when it attached.
+    while !stop.load(Ordering::Relaxed) {
+        // Wait (forever) for this UE's data-plane tunnel to come up.
+        let mut tun_ip = live_tun_ip(ue);
+        while tun_ip.is_empty() {
             if stop.load(Ordering::Relaxed) { return; }
             thread::sleep(Duration::from_secs(1));
             tun_ip = live_tun_ip(ue);
-            if !tun_ip.is_empty() { break; }
         }
-    }
-    if tun_ip.is_empty() { return; }   // no tunnel — UE never reached DATA stage, skip
-    ensure_iperf_route(ue, &tun_ip);
+        ensure_iperf_route(ue, &tun_ip);
 
-    let mut child = match Command::new("ip")
-        .args(["netns", "exec", &ns, "ping", "-i", "1", "-W", "3", "-I", "oaitun_ue1", &target])
-        .stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null()).spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines() {
-            if stop.load(Ordering::Relaxed) { break; }
-            let line = match line { Ok(l) => l, Err(_) => break };
-            if let Some(p) = line.find("time=") {
-                let v: String = line[p + 5..].chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-                if let Ok(rtt) = v.parse::<f64>() {
-                    if let Ok(mut m) = shared.lock() {
-                        let e = m.entry(ue).or_default();
-                        e.recv += 1;
-                        e.last_rtt = Some(rtt);
-                        e.rtt.push_back(rtt);
-                        while e.rtt.len() > RTT_HIST { e.rtt.pop_front(); }
+        let mut child = match Command::new("ip")
+            .args(["netns", "exec", &ns, "ping", "-i", "1", "-W", "3", "-I", "oaitun_ue1", &target])
+            .stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null()).spawn()
+        {
+            Ok(c) => c,
+            // spawn failed (e.g. netns vanished mid-reattach) — back off and retry
+            Err(_) => { thread::sleep(Duration::from_secs(1)); continue; }
+        };
+        if let Some(out) = child.stdout.take() {
+            for line in BufReader::new(out).lines() {
+                if stop.load(Ordering::Relaxed) { break; }
+                let line = match line { Ok(l) => l, Err(_) => break };
+                if let Some(p) = line.find("time=") {
+                    let v: String = line[p + 5..].chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+                    if let Ok(rtt) = v.parse::<f64>() {
+                        if let Ok(mut m) = shared.lock() {
+                            let e = m.entry(ue).or_default();
+                            e.recv += 1;
+                            e.last_rtt = Some(rtt);
+                            e.rtt.push_back(rtt);
+                            while e.rtt.len() > RTT_HIST { e.rtt.pop_front(); }
+                        }
                     }
                 }
             }
         }
+        let _ = child.kill();
+        let _ = child.wait();
+        // ping ended (UE dropped / netns recreated). If not stopping, the outer
+        // loop re-waits for the tunnel and resumes — handles re-attach cleanly.
+        if !stop.load(Ordering::Relaxed) { thread::sleep(Duration::from_secs(1)); }
     }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn tput_thread(ue: usize, shared: Shared, stop: Arc<AtomicBool>) {
@@ -1439,9 +1515,28 @@ fn stage_color(stage: &str) -> Color {
     }
 }
 
+/// A compact per-slice PRB-share rollup for the Monitor table's bottom border,
+/// built from the live du.log slice metrics (empty when none are available).
+fn slice_rollup_line(slice_metrics: &HashMap<SliceId, SliceMetric>) -> Line<'static> {
+    if slice_metrics.is_empty() {
+        return Line::from("");
+    }
+    let mut slices: Vec<(&SliceId, &SliceMetric)> = slice_metrics.iter().collect();
+    slices.sort_by_key(|(s, _)| (s.sst, s.sd.unwrap_or(u32::MAX)));
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    for (sid, m) in slices {
+        spans.push(Span::styled(
+            format!("{} {:.0}%  ", sid.short(), m.dl_prb_ratio),
+            Style::default().fg(configure::slice_color(*sid)),
+        ));
+    }
+    Line::from(spans)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_dash(
     f: &mut ratatui::Frame<'_>,
+    area: ratatui::layout::Rect,
     views: &[UeView],
     ps: &NueProxyStatus,
     gnb_up: bool,
@@ -1457,6 +1552,8 @@ fn render_dash(
     srv: &Option<String>,
     metric: ChartMetric,
     status: &str,
+    _slice_map: &HashMap<usize, SliceMapEntry>,
+    _slice_metrics: &HashMap<SliceId, SliceMetric>,
 ) {
     let n = views.len();
     let reg_n = views.iter().filter(|v| v.conn.reg > 0).count();
@@ -1464,7 +1561,7 @@ fn render_dash(
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(6), Constraint::Length(14), Constraint::Length(2)])
-        .split(f.area());
+        .split(area);
 
     let border_st = Style::default().fg(Color::Rgb(190, 188, 182));
     let title_st  = Style::default().fg(Color::Rgb(225, 222, 215)).add_modifier(Modifier::BOLD);
@@ -1546,7 +1643,8 @@ fn render_dash(
         Constraint::Length(7), Constraint::Length(6), Constraint::Length(7), Constraint::Length(7),
     ];
     let table = Table::new(rows, widths).header(header)
-        .block(Block::default().borders(Borders::ALL).border_style(border_st).title(" UEs (↑↓ select) "));
+        .block(Block::default().borders(Borders::ALL).border_style(border_st)
+            .title(" UEs (↑↓ select) "));
     f.render_widget(table, mid[0]);
 
     const PALETTE: [Color; 8] = [
@@ -1746,6 +1844,63 @@ fn render_dash(
     f.render_widget(keys, root[3]);
 }
 
+/// The three dashboard pages. Monitor is the live test (the original screen);
+/// Configure is the per-UE slice/cell editor; Advanced is mobility + SLA closed loop.
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Monitor,
+    Configure,
+    Advanced,
+}
+
+impl Page {
+    fn next(self) -> Page {
+        match self {
+            Page::Monitor => Page::Configure,
+            Page::Configure => Page::Advanced,
+            Page::Advanced => Page::Monitor,
+        }
+    }
+    fn prev(self) -> Page {
+        match self {
+            Page::Monitor => Page::Advanced,
+            Page::Configure => Page::Monitor,
+            Page::Advanced => Page::Configure,
+        }
+    }
+}
+
+/// Global tab bar drawn on the top line of every page.
+fn render_tab_bar(f: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, page: Page, gnb_up: bool, n_ues: usize) {
+    let tab = |p: Page, n: &str, key: &str| -> Vec<Span<'static>> {
+        let active = p == page;
+        let st = if active {
+            Style::default().fg(Color::Black).bg(Color::Rgb(0, 175, 215)).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Rgb(180, 178, 172))
+        };
+        vec![
+            Span::styled(format!(" [{}]{} ", key, n), st),
+            Span::raw(" "),
+        ]
+    };
+    let mut spans: Vec<Span> = vec![Span::styled(" OCUDU UE-SIM 2.0 ",
+        Style::default().fg(Color::Rgb(225, 222, 215)).add_modifier(Modifier::BOLD))];
+    spans.extend(tab(Page::Monitor, "Monitor", "1"));
+    spans.extend(tab(Page::Configure, "Configure", "2"));
+    spans.extend(tab(Page::Advanced, "Advanced", "3"));
+    spans.push(Span::raw("  "));
+    spans.push(if gnb_up {
+        Span::styled("gNB ●", Style::default().fg(Color::Rgb(0, 175, 80)).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled("gNB ○", Style::default().fg(Color::Rgb(215, 80, 80)).add_modifier(Modifier::BOLD))
+    });
+    spans.push(Span::styled(format!("  {} UEs   Tab switch page  q quit", n_ues),
+        Style::default().fg(Color::Rgb(140, 138, 132))));
+    let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(28, 30, 36)));
+    f.render_widget(p, area);
+}
+
 fn cmd_monitor(num_ues: Option<usize>, interval_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
     let shared: Shared = Arc::new(Mutex::new(HashMap::new()));
     let mut ping_stops: Vec<Arc<AtomicBool>> = Vec::new();
@@ -1766,6 +1921,12 @@ fn cmd_monitor(num_ues: Option<usize>, interval_ms: u64) -> Result<(), Box<dyn s
     let mut metric = ChartMetric::AvgRtt;
     let mut status = String::from("ready — press p to ping, i speedtest, v video, L load-dist");
     const STATUS_DEFAULT: &str = "ready — press p to ping, i speedtest, v video, L load-dist";
+
+    // --- 2.0 paged app state ---
+    let mut page = Page::Monitor;
+    let mut cfg_state = configure::ConfigureState::new();
+    let mut adv_state = advanced::AdvancedState::new();
+    let scripts_dir_s = scripts_dir();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1832,13 +1993,92 @@ fn cmd_monitor(num_ues: Option<usize>, interval_ms: u64) -> Result<(), Box<dyn s
             let proxy_dup = proxy_n > 1;
             let ps = read_nue_proxy_status();
             let lfi = if load_on && !views.is_empty() { load_focus.load(Ordering::Relaxed) % views.len() } else { 0 };
-            terminal.draw(|f| render_dash(f, &views, &ps, gnb_up, gnb_dup, proxy_up, proxy_dup, sel, n_set, ping_on, load_on, lfi, &target, &srv, metric, &status))?;
+
+            // 2.0: shared slice data + cross-page context, refreshed each frame.
+            let slice_map = read_slice_map();
+            let slice_metrics = read_slice_metrics();
+            let ue_health: Vec<UeHealth> = views.iter().map(|v| UeHealth {
+                id: v.conn.id,
+                stage: v.conn.stage.to_string(),
+                ip: v.conn.ip.clone(),
+                has_tun: v.conn.has_tun,
+                last_rtt: v.last_rtt,
+                dl_mbps: v.dl_mbps,
+                ul_mbps: v.ul_mbps,
+            }).collect();
+
+            terminal.draw(|f| {
+                let area = f.area();
+                let vlayout = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Min(0)])
+                    .split(area);
+                render_tab_bar(f, vlayout[0], page, gnb_up, views.len());
+                let body = vlayout[1];
+                let ctx = PageCtx {
+                    ue_health: &ue_health,
+                    slice_map: &slice_map,
+                    slice_metrics: &slice_metrics,
+                    srv: &srv,
+                    gnb_up,
+                    scripts_dir: &scripts_dir_s,
+                };
+                match page {
+                    Page::Monitor => render_dash(f, body, &views, &ps, gnb_up, gnb_dup, proxy_up, proxy_dup, sel, n_set, ping_on, load_on, lfi, &target, &srv, metric, &status, &slice_map, &slice_metrics),
+                    Page::Configure => cfg_state.render(f, body, &ctx),
+                    Page::Advanced => adv_state.render(f, body, &ctx),
+                }
+            })?;
 
             if event::poll(tick)? {
                 if let Event::Key(k) = event::read()? {
+                    // Hard-global: quit always works on every page, regardless of focus.
                     match k.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        _ => {}
+                    }
+                    // Configure / Advanced get FIRST crack at every other key, so digit
+                    // entry (e.g. setting SST/SD) is captured by the page. Only keys the
+                    // page does NOT consume act as page-switch (digits/Tab fall through).
+                    if page != Page::Monitor {
+                        let slice_map = read_slice_map();
+                        let slice_metrics = read_slice_metrics();
+                        let ue_health: Vec<UeHealth> = views.iter().map(|v| UeHealth {
+                            id: v.conn.id, stage: v.conn.stage.to_string(), ip: v.conn.ip.clone(),
+                            has_tun: v.conn.has_tun, last_rtt: v.last_rtt, dl_mbps: v.dl_mbps, ul_mbps: v.ul_mbps,
+                        }).collect();
+                        let ctx = PageCtx {
+                            ue_health: &ue_health, slice_map: &slice_map, slice_metrics: &slice_metrics,
+                            srv: &srv, gnb_up, scripts_dir: &scripts_dir_s,
+                        };
+                        let consumed = match page {
+                            Page::Configure => cfg_state.handle_key(k, &ctx),
+                            Page::Advanced => adv_state.handle_key(k, &ctx),
+                            _ => false,
+                        };
+                        if !consumed {
+                            match k.code {
+                                KeyCode::Char('1') => page = Page::Monitor,
+                                KeyCode::Char('2') => page = Page::Configure,
+                                KeyCode::Char('3') => page = Page::Advanced,
+                                KeyCode::Tab => page = page.next(),
+                                KeyCode::BackTab => page = page.prev(),
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    // Monitor page: digits/Tab switch pages, everything else is a monitor key.
+                    match k.code {
+                        KeyCode::Char('1') => { page = Page::Monitor; continue; }
+                        KeyCode::Char('2') => { page = Page::Configure; continue; }
+                        KeyCode::Char('3') => { page = Page::Advanced; continue; }
+                        KeyCode::Tab => { page = page.next(); continue; }
+                        KeyCode::BackTab => { page = page.prev(); continue; }
+                        _ => {}
+                    }
+                    match k.code {
                         KeyCode::Up   => sel = sel.saturating_sub(1),
                         KeyCode::Down => if sel + 1 < views.len() { sel += 1; },
                         KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -2048,5 +2288,79 @@ fn main() {
                 eprintln!("monitor error: {}", e);
             }
         }
+        Commands::RenderTest { page } => cmd_render_test(&page),
+    }
+}
+
+/// Offline render check: draw a page to a ratatui TestBackend and print the text buffer.
+/// Uses representative fake state so we can eyeball the layout without a live RAN.
+fn cmd_render_test(page: &str) {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    // Representative fleet: two slices, one UE already on cell B (a handover target).
+    let mk = |sst: u8, sd: &str, cell: &str| SliceMapEntry {
+        sst,
+        sd: Some(sd.to_string()),
+        dnn: Some("oai".to_string()),
+        cell: Some(cell.to_string()),
+        imsi: Some("001010000000001".to_string()),
+    };
+    let mut slice_map: HashMap<usize, SliceMapEntry> = HashMap::new();
+    slice_map.insert(1, mk(1, "1", "A"));
+    slice_map.insert(2, mk(1, "1", "A"));
+    slice_map.insert(3, mk(2, "2", "A"));
+    slice_map.insert(4, mk(2, "2", "B"));
+    let ue_health: Vec<UeHealth> = (1..=4)
+        .map(|id| UeHealth {
+            id,
+            stage: "CONNECTED".to_string(),
+            ip: format!("10.0.0.{}", id + 1),
+            has_tun: true,
+            last_rtt: Some(12.0 + id as f64),
+            dl_mbps: 8.0,
+            ul_mbps: 1.0,
+        })
+        .collect();
+    let slice_metrics: HashMap<SliceId, SliceMetric> = HashMap::new();
+    let srv = Some("127.0.0.1".to_string());
+    let scripts_dir_s = scripts_dir();
+    let ctx = PageCtx {
+        ue_health: &ue_health,
+        slice_map: &slice_map,
+        slice_metrics: &slice_metrics,
+        srv: &srv,
+        gnb_up: true,
+        scripts_dir: &scripts_dir_s,
+    };
+
+    let dump = |title: &str, render: &mut dyn FnMut(&mut ratatui::Frame)| {
+        let backend = TestBackend::new(120, 40);
+        let mut term = Terminal::new(backend).expect("test terminal");
+        term.draw(|f| render(f)).expect("draw");
+        let buf = term.backend().buffer().clone();
+        println!("\n===== {} (120x40) =====", title);
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            println!("{}", line.trim_end());
+        }
+    };
+
+    if page == "configure" || page == "both" {
+        let mut cfg = configure::ConfigureState::new();
+        dump("CONFIGURE", &mut |f| {
+            let area = f.area();
+            cfg.render(f, area, &ctx);
+        });
+    }
+    if page == "advanced" || page == "both" {
+        let mut adv = advanced::AdvancedState::new();
+        dump("ADVANCED", &mut |f| {
+            let area = f.area();
+            adv.render(f, area, &ctx);
+        });
     }
 }

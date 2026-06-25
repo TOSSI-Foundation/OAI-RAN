@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# Copyright 2025-2026 coRAN LABS Private Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -100,4 +99,22 @@ ip netns exec "$ns" \
     --device.name oai_zmqdevif "${SSB_FLAG[@]}" --uecap_file "$UECAP" \
     > "$LOGDIR/ue${k}_nue.log" 2>&1 < /dev/null &
 disown -a 2>/dev/null || true
+
+# Merge this live-added UE into /tmp/multi_ue_slice_map.json so the dashboard can
+# show its slice/cell. mue.env only carries a single SST/DNN (no per-UE SD), so the
+# live UE inherits that identity; SD is left null. Best-effort (python3 always present).
+python3 - "$k" "$SST" "${DNN:-oai}" "$IMSI" <<'PY' 2>/dev/null || true
+import json, os, sys
+k, sst, dnn, imsi = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+p = "/tmp/multi_ue_slice_map.json"
+m = {}
+try:
+    with open(p) as f: m = json.load(f)
+except Exception: m = {}
+m[str(k)] = {"sst": int(sst), "sd": None, "dnn": dnn, "cell": "A", "imsi": imsi}
+tmp = p + ".tmp"
+with open(tmp, "w") as f: json.dump(m, f, indent=2)
+os.replace(tmp, p)
+PY
+
 echo "[mue_add] UE$k launched (IMSI $IMSI). Watch the dashboard."

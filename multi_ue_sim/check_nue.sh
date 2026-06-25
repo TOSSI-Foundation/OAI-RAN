@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# Copyright 2025-2026 coRAN LABS Private Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +18,10 @@ set -uo pipefail
 N="${1:-$(cat /tmp/run_nue.n 2>/dev/null || echo 2)}"
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGDIR="${LOGDIR:-$_SCRIPT_DIR/logs}"
-GNB_LOG="${GNB_LOG:-$(realpath "$_SCRIPT_DIR/../../ocudu_split_release/build/apps/du/du.log" 2>/dev/null || echo "$_SCRIPT_DIR/../../ocudu_split_release/build/apps/du/du.log")}"
+# gNB DU log: odu runs with cwd=$OCUDU (build/apps) and config log.filename=du.log.
+# Both OCUDU_TREE and GNB_LOG are optional here — if neither is set the DU-side
+# counts read as 0 (the proxy/UE checks still work).
+GNB_LOG="${GNB_LOG:-${OCUDU_TREE:+$OCUDU_TREE/build/apps/du.log}}"
 
 c() { local n; n=$(grep -c "$1" "$2" 2>/dev/null) || true; echo "${n:-0}"; }
 

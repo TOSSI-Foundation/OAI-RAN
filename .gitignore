@@ -9,6 +9,14 @@ log/
 lte_build_oai/
 build*
 
+# rollback / backup artifacts (e.g. nr-uesoftmodem.bak_prezmqfix)
+*.bak
+*.bak.*
+*.bak_*
+*.orig
+*.orig.*
+*.orig_*
+
 # IDE files
 .vscode
 .cproject
