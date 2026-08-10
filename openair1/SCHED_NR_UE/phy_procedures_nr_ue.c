@@ -228,7 +228,11 @@ void ue_ta_procedures(PHY_VARS_NR_UE *ue, int slot_tx, int frame_tx)
     // = 16 * ofdm_symbol_size / 2048
     uint16_t bw_scaling = 16 * ofdm_symbol_size / 2048;
 
-    ue->timing_advance += (ue->ta_command - 31) * bw_scaling;
+    if (ue->ta_is_rar) {
+      ue->timing_advance = (ue->ta_command - 31) * bw_scaling;
+    } else {
+      ue->timing_advance += (ue->ta_command - 31) * bw_scaling;
+    }
 
     LOG_D(PHY,
           "[UE %d] [%d.%d] Got timing advance command %u from MAC, new value is %d\n",

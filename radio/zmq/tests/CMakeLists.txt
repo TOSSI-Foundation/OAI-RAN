@@ -11,3 +11,9 @@ target_link_libraries(test_zmq_radio PRIVATE zmq_radio_static UTIL CONFIG_LIB GT
 add_dependencies(tests test_zmq_radio)
 add_test(NAME test_zmq_radio
     COMMAND ./test_zmq_radio)
+
+add_executable(test_ntn_channel ntn_channel_test.cpp ../zmq_ntn_channel.cpp)
+target_include_directories(test_ntn_channel PRIVATE ..)
+add_dependencies(tests test_ntn_channel)
+add_test(NAME test_ntn_channel
+    COMMAND ./test_ntn_channel)

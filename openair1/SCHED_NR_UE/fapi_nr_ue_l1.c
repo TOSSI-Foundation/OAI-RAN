@@ -110,6 +110,7 @@ static void configure_ta_command(PHY_VARS_NR_UE *ue, fapi_nr_ta_command_pdu *ta_
   const double t_subframe = 1.0; // subframe duration of 1 msec
   const int ul_tx_timing_adjustment = 1 + (int)ceil(slots_per_subframe * (N_t_1 + N_t_2 + N_TA_max + 0.5) / t_subframe);
 
+  ue->ta_is_rar = ta_command_pdu->is_rar;
   if (ta_command_pdu->is_rar) {
     ue->ta_slot = ta_command_pdu->ta_slot;
     ue->ta_frame = ta_command_pdu->ta_frame;

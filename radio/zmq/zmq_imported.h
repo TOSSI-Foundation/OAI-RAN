@@ -20,6 +20,7 @@ class zmq_tx_channel {
   overflow_buffer buffer_;
   std::atomic<uint64_t> sample_count_{0};
   std::atomic<bool> is_tx_enabled_{false};
+  bool zoh_small_holes_ = false;
   std::mutex transmit_alignment_mutex_;
   std::condition_variable transmit_alignment_cvar_;
 

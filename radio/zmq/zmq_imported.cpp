@@ -8,6 +8,7 @@
 #include "log.h"
 
 const float c16_t_to_cf_t_factor = std::numeric_limits<int16_t>::max();
+static constexpr uint64_t ZOH_MAX_HOLE_SAMPLES = 16;
 static constexpr std::chrono::milliseconds TRANSMIT_TS_ALIGN_TIMEOUT = std::chrono::milliseconds(0);
 static constexpr std::chrono::milliseconds RECEIVE_TS_ALIGN_TIMEOUT = std::chrono::milliseconds(100);
 
@@ -16,7 +17,14 @@ void zmq_tx_channel::transmit(c16_t *samples, size_t nsamps, uint64_t timestamp)
   std::lock_guard<std::mutex> lock(transmit_alignment_mutex_);
   size_t overflow = 0;
   if (timestamp > sample_count_) {
-    overflow += buffer_.push_zeros(timestamp - sample_count_);
+    const uint64_t hole = timestamp - sample_count_;
+    if (zoh_small_holes_ && hole <= ZOH_MAX_HOLE_SAMPLES && nsamps > 0) {
+      const cf_t held = {samples[0].r / c16_t_to_cf_t_factor, samples[0].i / c16_t_to_cf_t_factor};
+      for (uint64_t i = 0; i < hole; i++)
+        overflow += buffer_.push_samples(&held, 1);
+    } else {
+      overflow += buffer_.push_zeros(hole);
+    }
     sample_count_ = timestamp;
   }
   cf_t samples_float[nsamps];

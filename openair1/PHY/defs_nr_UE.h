@@ -388,6 +388,7 @@ typedef struct PHY_VARS_NR_UE_s {
   int ta_frame;
   int ta_slot;
   int ta_command;
+  bool ta_is_rar;
 
   /// Flag to initialize averaging of PHY measurements
   int init_averaging;
