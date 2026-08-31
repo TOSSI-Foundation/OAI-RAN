@@ -1209,7 +1209,8 @@ static void combine_received_beams(rfsimulator_state_t *t,
                                    int num_aatx,
                                    size_t num_samples,
                                    int rx_beam_id,
-                                   c16_t **samples)
+                                   c16_t **samples,
+                                   bool accumulate = false)
 {
   // Assume received_packets is ordered by timestamp
   std::queue<rfsim_packet_t *> packets_copy = received_packets;
@@ -1238,7 +1239,7 @@ static void combine_received_beams(rfsimulator_state_t *t,
       for (int aatx = 0; aatx < num_aatx; aatx++) {
         c16_t *buffer = (c16_t *)pkt->payload;
         c16_t *tx_ant_buffer_in = &buffer[(num_aatx * beam + aatx) * pkt->header.size + read_start_idx];
-        if (beam == 0) {
+        if (beam == 0 && !accumulate) {
           // For the first beam, we can directly copy the samples
           if (gain_dB == 0.0f) {
             // If gain is 0 dB, we can use memcpy for efficiency
@@ -1387,9 +1388,21 @@ static void rfsimulator_read_internal(rfsimulator_state_t *t,
           rxAddInput(input, temp_array[aarx], aarx, ptr->channel_model, nsamps);
         }
       } else {
-        if (is_first_beam && is_first_peer && (ptr->nbAnt == 1 && nbAnt == 1)) {
-          // optimization: The buffer is uninitialized so samples can be written directly in the buffer
-          combine_received_beams(t, ptr->received_packets, timestamp - t->chan_offset, 1, nsamps, rx_beam_id, samples);
+        if (ptr->nbAnt == 1 && nbAnt == 1) {
+          // Single antenna both sides: the per-antenna mixing coefficient below is
+          // exactly 1.0, so the scratch buffer, its zero fill and the multiply-add pass
+          // are all identity. Combine straight into the output instead. The first
+          // contribution writes (the buffer is uninitialised); later peers accumulate,
+          // which is what the scratch path did by adding the zero-filled temporary.
+          const bool first_contribution = is_first_beam && is_first_peer;
+          combine_received_beams(t,
+                                 ptr->received_packets,
+                                 timestamp - t->chan_offset,
+                                 1,
+                                 nsamps,
+                                 rx_beam_id,
+                                 samples,
+                                 !first_contribution);
         } else {
           std::vector<std::vector<c16_t>> ant_buffers(ptr->nbAnt, std::vector<c16_t>(nsamps, {0, 0}));
           c16_t *input[ant_buffers.size()];
