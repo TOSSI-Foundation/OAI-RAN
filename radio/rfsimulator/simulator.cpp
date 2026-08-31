@@ -13,6 +13,8 @@
 #include "utils.h"
 #include <cstdint>
 #include <sys/socket.h>
+#include <sys/uio.h>
+#include <netinet/tcp.h>
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -333,6 +335,11 @@ static buffer_t *allocCirBuf(rfsimulator_state_t *bridge, int sock)
     LOG_E(HW, "setsockopt(SO_SNDBUF) failed\n");
     return NULL;
   }
+  /* Lockstep protocol: every block must reach the peer before the peer can answer, so
+     there is never more data coming to coalesce with. Nagle can only add delay here. */
+  int nodelay = 1;
+  if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) != 0)
+    LOG_E(HW, "setsockopt(TCP_NODELAY) failed\n");
   struct epoll_event ev = {0};
   ev.events = EPOLLIN | EPOLLRDHUP;
   ev.data.ptr = ptr;
@@ -451,6 +458,57 @@ static void fullwrite(int fd, void *_buf, ssize_t count, rfsimulator_state_t *t)
 
     count -= l;
     buf += l;
+  }
+}
+
+/* Gather-write of a whole sample block in one syscall.
+
+   The block is a small header immediately followed by one buffer per antenna. Writing
+   them separately costs one syscall per buffer, and the 32-byte header costs as much as
+   the ~120 KB of samples behind it. At 2000 slots/s that is 2 syscalls per connected
+   client per slot, on the single thread that also runs the PHY, so it is the dominant
+   cost once a few clients are attached. writev() sends the lot in one call. */
+static void fullwritev(int fd, struct iovec *iov, int iovcnt, rfsimulator_state_t *t)
+{
+  if (t->saveIQfile != -1) {
+    for (int i = 0; i < iovcnt; i++)
+      if (write(t->saveIQfile, iov[i].iov_base, iov[i].iov_len) != (ssize_t)iov[i].iov_len)
+        LOG_E(HW, "write() in save iq file failed (%d)\n", errno);
+  }
+
+  while (iovcnt > 0) {
+    ssize_t l = writev(fd, iov, iovcnt);
+
+    if (l == 0) {
+      LOG_E(HW, "writev() failed, returned 0\n");
+      return;
+    }
+
+    if (l < 0) {
+      if (errno == EINTR)
+        continue;
+
+      if (errno == EAGAIN) {
+        LOG_D(HW, "writev() failed, errno(%d)\n", errno);
+        usleep(250);
+        continue;
+      } else {
+        LOG_E(HW, "writev() failed, errno(%d)\n", errno);
+        return;
+      }
+    }
+
+    /* Drop whole buffers that went out, then trim the one straddling the boundary. */
+    while (iovcnt > 0 && (size_t)l >= iov->iov_len) {
+      l -= iov->iov_len;
+      iov++;
+      iovcnt--;
+    }
+
+    if (iovcnt > 0 && l > 0) {
+      iov->iov_base = (char *)iov->iov_base + l;
+      iov->iov_len -= l;
+    }
   }
 }
 
@@ -967,7 +1025,6 @@ static int rfsimulator_write_internal(rfsimulator_state_t *t,
 
     if (b->conn_sock >= 0) {
       samplesBlockHeader_t header = {(uint32_t)nsamps, (uint32_t)nbAnt, (uint64_t)timestamp, 0, 0, beams_to_beam_map(tx_beams)};
-      fullwrite(b->conn_sock, &header, sizeof(header), t);
       int num_beams = tx_beams.size();
       // Send beams in order of beam index. This is required for beam_map to work correctly on the receiver side.
       std::vector<size_t> indices(tx_beams.size());
@@ -975,12 +1032,18 @@ static int rfsimulator_write_internal(rfsimulator_state_t *t,
       std::sort(indices.begin(), indices.end(), [&](size_t i, size_t j) { return tx_beams[i] < tx_beams[j]; });
 
       AssertFatal(num_beams > 0, "Must set at least one bit in beam_map\n");
+      /* Header and every antenna buffer go out in a single writev(): same bytes, same
+         order on the wire, one syscall instead of 1 + num_beams * nbAnt. */
+      std::vector<struct iovec> iov;
+      iov.reserve(1 + (size_t)num_beams * nbAnt);
+      iov.push_back({(void *)&header, sizeof(header)});
       for (int beam = 0; beam < num_beams; beam++) {
         for (int a = 0; a < nbAnt; a++) {
           sample_t *in = (sample_t *)samplesVoid[indices[beam]][a];
-          fullwrite(b->conn_sock, (void *)in, sampleToByte(nsamps, 1), t);
+          iov.push_back({(void *)in, (size_t)sampleToByte(nsamps, 1)});
         }
       }
+      fullwritev(b->conn_sock, iov.data(), (int)iov.size(), t);
     }
   }
 
