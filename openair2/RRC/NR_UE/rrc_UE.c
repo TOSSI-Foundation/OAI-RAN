@@ -3284,7 +3284,7 @@ static void nr_rrc_handle_meas_indication(NR_UE_RRC_INST_t *rrc, NRRrcMacMeasDat
   }
 
   if (!meas_cell) {
-    LOG_E(NR_RRC, "meas_cell not found!\n");
+    LOG_D(NR_RRC, "no free neighbouring-cell measurement slot for Nid_cell %i\n", meas_ind->Nid_cell);
     return;
   }
 
