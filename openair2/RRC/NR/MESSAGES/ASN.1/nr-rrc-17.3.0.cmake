@@ -1563,6 +1563,10 @@ NR_SIB17-IEs-r17.c
 NR_SIB17-r17.c
 NR_SIB18-r17.c
 NR_SIB19-r17.c
+NR_SatSwitchWithReSync-r18.c
+NR_NTN-CovEnh-r18.c
+NR_RefLocList-r19.c
+NR_Assisted-SSB-MTC-MG-RefLoc-r19.c
 NR_SIB1.c
 NR_SIB1-v1610-IEs.c
 NR_SIB1-v1630-IEs.c
@@ -3684,6 +3688,10 @@ NR_SIB17-IEs-r17.h
 NR_SIB17-r17.h
 NR_SIB18-r17.h
 NR_SIB19-r17.h
+NR_SatSwitchWithReSync-r18.h
+NR_NTN-CovEnh-r18.h
+NR_RefLocList-r19.h
+NR_Assisted-SSB-MTC-MG-RefLoc-r19.h
 NR_SIB1.h
 NR_SIB1-v1610-IEs.h
 NR_SIB1-v1630-IEs.h

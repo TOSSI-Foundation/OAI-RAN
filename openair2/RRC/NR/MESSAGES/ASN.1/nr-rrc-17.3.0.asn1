@@ -3194,7 +3194,32 @@ SIB19-r17 ::= SEQUENCE {
     ...,
     [[
     ntn-NeighCellConfigListExt-v1720         NTN-NeighCellConfigList-r17                     OPTIONAL        -- Need R
+    ]],
+    [[
+    movingReferenceLocation-r18              ReferenceLocation-r17                           OPTIONAL,       -- Need R
+    ntn-CovEnh-r18                           NTN-CovEnh-r18                                  OPTIONAL,       -- Need R
+    satSwitchWithReSync-r18                  SatSwitchWithReSync-r18                         OPTIONAL        -- Need R
+    ]],
+    [[
+    refLocList-r19                           RefLocList-r19                                  OPTIONAL        -- Need R
     ]]
+}
+
+NTN-CovEnh-r18 ::=                       SEQUENCE {
+    numberOfMsg4HARQ-ACK-Repetitions-r18     BIT STRING (SIZE(4)),
+    rsrp-ThresholdMsg4HARQ-ACK-r18           RSRP-Range                                      OPTIONAL        -- Need R
+}
+
+RefLocList-r19 ::=                       SEQUENCE (SIZE(1..7)) OF Assisted-SSB-MTC-MG-RefLoc-r19
+
+Assisted-SSB-MTC-MG-RefLoc-r19 ::=       SEQUENCE {
+    refLoc-r19                               ReferenceLocation-r17                           OPTIONAL        -- Need S
+}
+
+SatSwitchWithReSync-r18 ::=              SEQUENCE {
+    ntn-Config-r18                           NTN-Config-r17,
+    t-ServiceStart-r18                       INTEGER (0..549755813887)                       OPTIONAL,       -- Need R
+    ssb-TimeOffset-r18                       INTEGER (0..159)                                OPTIONAL        -- Need R
 }
 
 NTN-NeighCellConfigList-r17 ::=          SEQUENCE (SIZE(1..maxCellNTN-r17))  OF NTN-NeighCellConfig-r17
