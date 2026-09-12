@@ -501,8 +501,8 @@ static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
     // Apply Doppler based on NTN-Config for target cell
     if (UE->nrUE_config.ntn_config.is_targetcell)
       apply_ntn_timing_advance_and_doppler(UE, fp, -1);
-    // Apply NTN DL Doppler as initial FO
-    UE->initial_fo = UE->dl_Doppler_shift;
+    if (get_nrUE_params()->cont_fo_comp)
+      UE->initial_fo = UE->dl_Doppler_shift;
 
     /* Clearing UE harq while DL actors are active causes race condition.
         So we let the current execution to complete here.*/
