@@ -164,6 +164,20 @@ void handle_ulsync_loss(NR_UE_MAC_INST_t *mac)
 
 void update_mac_dl_timers(NR_UE_MAC_INST_t *mac)
 {
+  if (mac->sat_switch_at_ms && nr_ue_ms_since_1900() >= mac->sat_switch_at_ms) {
+    mac->sat_switch_at_ms = 0;
+    LOG_I(NR_MAC,
+          "satSwitchWithReSync-r18: t-ServiceStart reached, taking the target satellite into service in-cell "
+          "(ssb-TimeOffset %ld sf)\n",
+          mac->sat_switch_ssb_time_offset);
+    const bool was_target = mac->phy_config.config_req.ntn_config.is_targetcell;
+    mac->phy_config.config_req.ntn_config = mac->sat_switch_target;
+    mac->phy_config.config_req.ntn_config.is_targetcell = was_target;
+    mac->phy_config.config_req.ntn_config.params_changed = true;
+    mac->if_module->phy_config_request(&mac->phy_config);
+    mac->phy_config.config_req.ntn_config.params_changed = false;
+  }
+
   bool ra_window_expired = nr_timer_tick(&mac->ra.response_window_timer);
   if (ra_window_expired) // consider the Random Access Response reception not successful
     nr_rar_not_successful(mac);

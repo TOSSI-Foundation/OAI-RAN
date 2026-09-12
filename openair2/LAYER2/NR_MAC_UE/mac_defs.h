@@ -537,6 +537,13 @@ typedef struct {
   uint16_t ue_id;
 } nr_ue_paging_cfg_t;
 
+static inline uint64_t nr_ue_ms_since_1900(void)
+{
+  struct timespec wall;
+  clock_gettime(CLOCK_REALTIME, &wall);
+  return (uint64_t)wall.tv_sec * 1000ULL + (uint64_t)wall.tv_nsec / 1000000ULL + 2208988800000ULL;
+}
+
 /*!\brief Top level UE MAC structure */
 typedef struct NR_UE_MAC_INST_s {
   module_id_t ue_id;
@@ -552,6 +559,10 @@ typedef struct NR_UE_MAC_INST_s {
   ssb_list_info_t ssb_list;
 
   NR_UE_ServingCell_Info_t sc_info;
+
+  fapi_nr_ntn_config_t sat_switch_target;
+  uint64_t sat_switch_at_ms;
+  long sat_switch_ssb_time_offset;
   A_SEQUENCE_OF(NR_UE_DL_BWP_t) dl_BWPs;
   A_SEQUENCE_OF(NR_UE_UL_BWP_t) ul_BWPs;
   NR_BWP_PDCCH_t config_BWP_PDCCH[MAX_NUM_BWP_UE];

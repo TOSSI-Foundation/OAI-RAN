@@ -2140,7 +2140,41 @@ void nr_rrc_mac_config_other_sib(module_id_t module_id, NR_SIB19_r17_t *sib19, i
   if (sib19) {
     // update ntn_Config_r17 with received values
     UPDATE_IE(mac->sc_info.ntn_Config_r17, sib19->ntn_Config_r17, NR_NTN_Config_r17_t);
-    configure_ntn_ta(&mac->phy_config.config_req.ntn_config, mac->sc_info.ntn_Config_r17, hfn, frame, false);
+
+    NR_NTN_Config_r17_t *ntn_in_use = mac->sc_info.ntn_Config_r17;
+    NR_NTN_Config_r17_t target;
+    if (sib19->ext2 && sib19->ext2->satSwitchWithReSync_r18) {
+      const NR_SatSwitchWithReSync_r18_t *sw = sib19->ext2->satSwitchWithReSync_r18;
+      unsigned long t_service_start = 0;
+      if (sw->t_ServiceStart_r18)
+        asn_INTEGER2ulong(sw->t_ServiceStart_r18, &t_service_start);
+      mac->sat_switch_ssb_time_offset = sw->ssb_TimeOffset_r18 ? *sw->ssb_TimeOffset_r18 : 0;
+
+      target = sw->ntn_Config_r18;
+      if (mac->sc_info.ntn_Config_r17) {
+        if (!target.epochTime_r17)
+          target.epochTime_r17 = mac->sc_info.ntn_Config_r17->epochTime_r17;
+        if (!target.cellSpecificKoffset_r17)
+          target.cellSpecificKoffset_r17 = mac->sc_info.ntn_Config_r17->cellSpecificKoffset_r17;
+        if (!target.ta_Info_r17)
+          target.ta_Info_r17 = mac->sc_info.ntn_Config_r17->ta_Info_r17;
+      }
+
+      const uint64_t now_since_1900 = nr_ue_ms_since_1900() / 10ULL;
+      if (!target.epochTime_r17 || !target.ephemerisInfo_r17) {
+        LOG_W(NR_MAC, "satSwitchWithReSync-r18 ignored: target has no epochTime or ephemeris to derive from\n");
+      } else if (t_service_start != 0 && t_service_start > now_since_1900 && mac->sat_switch_at_ms != t_service_start * 10) {
+        configure_ntn_ta(&mac->sat_switch_target, &target, hfn, frame, false);
+        mac->sat_switch_at_ms = (uint64_t)t_service_start * 10ULL;
+        LOG_I(NR_MAC,
+              "satSwitchWithReSync-r18 armed: switching satellite in %lu ms (at UTC deadline), ssb-TimeOffset %ld sf\n",
+              (unsigned long)(t_service_start - now_since_1900) * 10,
+              mac->sat_switch_ssb_time_offset);
+      } else if (t_service_start != 0 && t_service_start <= now_since_1900) {
+        ntn_in_use = &target;
+      }
+    }
+    configure_ntn_ta(&mac->phy_config.config_req.ntn_config, ntn_in_use, hfn, frame, false);
     mac->if_module->phy_config_request(&mac->phy_config);
     mac->phy_config.config_req.ntn_config.params_changed = false;
   }
