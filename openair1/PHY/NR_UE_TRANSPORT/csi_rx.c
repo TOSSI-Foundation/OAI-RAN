@@ -1028,8 +1028,7 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
     trs_freq_correction(ue, trs_cfo);
   }
 
-  // Send CSI measurements to MAC
-  if (!ue->if_inst || !ue->if_inst->dl_indication)
+  if (!ue->if_inst || !ue->if_inst->dl_indication || csirs_config_pdu->measurement_bitmap == 0)
     return;
 
   fapi_nr_l1_measurements_t l1_measurements = {
