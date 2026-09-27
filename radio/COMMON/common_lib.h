@@ -605,10 +605,17 @@ typedef struct {
   // i.e. nbAnt = 2 => this header+samples_antenna_0+samples_antenna_1
   // data following this header in bytes is nbAnt*size*sizeof(sample_t)
   uint64_t timestamp;      // Timestamp value of first sample
-  uint32_t option_value;   // Option value
+  uint32_t option_value;   // Option value; with RFSIM_OPT_NTN_DELAY, the sender's emulated delay in samples
   uint32_t option_flag;    // Option flag
   uint64_t beam_map;
 } samplesBlockHeader_t;
+
+/* option_flag: the sender is emulating a propagation delay and option_value says how many samples of it, so
+   the receiver reads that sender's stream that far behind. It cannot be done by shifting the timestamp: an
+   emulated NTN delay shrinks as the satellite rises, and a block starting before the previous one ended is
+   "data in past" to the receiver, which trashes it. Two satellites over one UE differ only in this delay, so
+   it is what lets the receiver tell their downlinks apart. Must match the OCUDU rfsimulator's definition. */
+#define RFSIM_OPT_NTN_DELAY 0x4e544e44u
 
 #ifdef __cplusplus
 extern "C"

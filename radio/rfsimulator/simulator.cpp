@@ -160,6 +160,10 @@ typedef struct buffer_s {
   char *transferPtr;
   uint64_t remainToTransfer;
   channel_desc_t *channel_model;
+  /* The delay this peer says it is emulating, in samples (RFSIM_OPT_NTN_DELAY): this stream is read that far
+     behind. Per peer, because two satellites serving one UE have different delays and their difference is
+     the geometry. */
+  uint64_t ntn_offset;
   rfsim_packet_t *packet_ptr;
   size_t payload_sz;
   size_t remainToTransferBeam;
@@ -1160,6 +1164,11 @@ static void process_recv_header(rfsimulator_state_t *t, buffer_t *b, bool first_
     LOG_A(HW, "RFsim: Number of antennas changed from %d to %d\n", b->nbAnt, b->th.nbAnt);
     b->nbAnt = b->th.nbAnt;
   }
+  if (b->th.option_flag == RFSIM_OPT_NTN_DELAY && b->ntn_offset != b->th.option_value) {
+    if (b->ntn_offset == 0)
+      LOG_I(HW, "UEsock: %d peer emulates %u samples of propagation delay\n", b->conn_sock, b->th.option_value);
+    b->ntn_offset = b->th.option_value;
+  }
   if (first_time) {
     b->lastReceivedTS = b->th.timestamp;
     b->trashingPacket = true;
@@ -1368,7 +1377,7 @@ static void rfsimulator_read_internal(rfsimulator_state_t *t,
           memset(temp_array, 0, sizeof(temp_array));
           channel_modelling = true;
         }
-        const uint64_t channel_offset = ptr->channel_model->channel_offset;
+        const uint64_t channel_offset = ptr->channel_model->channel_offset + ptr->ntn_offset;
         const uint64_t channel_length = ptr->channel_model->channel_length;
         std::vector<std::vector<c16_t>> ant_buffers(ptr->nbAnt, std::vector<c16_t>(nsamps + channel_length - 1, {0, 0}));
         c16_t *input[ant_buffers.size()];
@@ -1397,7 +1406,7 @@ static void rfsimulator_read_internal(rfsimulator_state_t *t,
           const bool first_contribution = is_first_beam && is_first_peer;
           combine_received_beams(t,
                                  ptr->received_packets,
-                                 timestamp - t->chan_offset,
+                                 timestamp - t->chan_offset - ptr->ntn_offset,
                                  1,
                                  nsamps,
                                  rx_beam_id,
@@ -1409,7 +1418,8 @@ static void rfsimulator_read_internal(rfsimulator_state_t *t,
           for (uint aatx = 0; aatx < ant_buffers.size(); aatx++) {
             input[aatx] = ant_buffers[aatx].data();
           }
-          combine_received_beams(t, ptr->received_packets, timestamp - t->chan_offset, ptr->nbAnt, nsamps, rx_beam_id, input);
+          combine_received_beams(
+              t, ptr->received_packets, timestamp - t->chan_offset - ptr->ntn_offset, ptr->nbAnt, nsamps, rx_beam_id, input);
           for (int aarx = 0; aarx < nbAnt; aarx++) {
             double H_awgn_mimo_coeff[ant_buffers.size()];
             for (int aatx = 0; aatx < (int)ant_buffers.size(); aatx++) {
@@ -1590,10 +1600,10 @@ static int rfsimulator_read_beams(openair0_device_t *device,
     if (ptr->conn_sock != -1 && !ptr->received_packets.empty()) {
       openair0_timestamp_t timestamp_to_free = t->nextRxTstamp - 1;
       if (ptr->channel_model) {
-        timestamp_to_free -=
-            (ptr->channel_model->channel_length - 1) + std::max(ptr->channel_model->channel_offset, t->chan_offset);
+        timestamp_to_free -= (ptr->channel_model->channel_length - 1) +
+                             std::max(ptr->channel_model->channel_offset, t->chan_offset) + ptr->ntn_offset;
       } else {
-        timestamp_to_free -= t->chan_offset;
+        timestamp_to_free -= t->chan_offset + ptr->ntn_offset;
       }
       clear_old_packets(ptr->received_packets, timestamp_to_free);
     }
