@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include "PHY/NR_UE_ESTIMATION/nr_ue_rxtx.h"
 #include "PHY/defs_nr_common.h"
 #define _GNU_SOURCE // For pthread_setname_np
 #include <pthread.h>
@@ -892,6 +893,7 @@ void *UE_thread(void *arg)
         // Set to the slot where the SL-SSB was decoded
         absolute_slot += UE->SL_UE_PHY_PARAMS.sync_params.slot_offset;
       }
+      nr_ue_rxtx_set_band(mac->nr_band);
       // With the correct frame and slot numbers, we can now fix the UL timing
       fix_ntn_epoch_hfn(UE, decoded_hfn_rx, decoded_frame_rx);
       if (UE->nrUE_config.ntn_config.params_changed) {
@@ -982,6 +984,8 @@ void *UE_thread(void *arg)
     metadata meta = {.slot =  curMsg.proc.nr_slot_rx, .frame =  curMsg.proc.frame_rx};
     UEscopeCopyWithMetadata(UE, ueTimeDomainSamples, rxp[0] - firstSymSamp, sizeof(c16_t), 1, readBlockSize, 0, &meta);
     AssertFatal(readBlockSize == tmp, "read to rf board failed %d", tmp);
+    // Where this DL slot starts in device time, for the UE Rx-Tx time difference (TS 38.215 5.1.30).
+    nr_ue_rxtx_record_dl(absolute_slot, rx_timestamp - firstSymSamp);
     struct timespec current_time;
     if (clock_gettime(CLOCK_REALTIME, &current_time)) {
       LOG_E(PHY, "clock_gettime failed\n");
@@ -1005,6 +1009,7 @@ void *UE_thread(void *arg)
         rx_timestamp + get_samples_slot_duration(fp, slot_nr, duration_rx_to_tx) - firstSymSamp - UE->N_TA_offset - timing_advance;
 
     // Calculate TX deadline, approximately 1 symbol before the first sample should be written
+    nr_ue_rxtx_record_ul(absolute_slot + duration_rx_to_tx, writeTimestamp);
     const uint64_t samples_diff = writeTimestamp - rx_timestamp - fp->ofdm_symbol_size;
     const float deadline_us = samples_diff * 1e3 / fp->samples_per_subframe;
     const uint64_t absolute_deadline_us = current_time.tv_sec * 1e6 + current_time.tv_nsec * 1e-3 + deadline_us;

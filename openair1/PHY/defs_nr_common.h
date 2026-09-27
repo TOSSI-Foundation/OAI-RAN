@@ -26,7 +26,9 @@
 #define NR_SSS_LENGTH 127
 
 #define NR_MAX_PRS_LENGTH 3264 //272*6(max allocation per RB)*2(QPSK)
-#define NR_MAX_PRS_INIT_LENGTH_DWORD 102 // ceil(NR_MAX_CSI_RS_LENGTH/32)
+// TS 38.211 7.4.1.7.3 counts the PRS sequence index m from Point A (k = m K_comb + ...), so a PRS starting at PRB P uses
+// r(m) from m = 12 P / K_comb. With Point A at the carrier start that reaches 275 PRBs x 6 REs x 2 bits = 3300 bits.
+#define NR_MAX_PRS_INIT_LENGTH_DWORD 104
 #define NR_MAX_PRS_COMB_SIZE 12
 #define NR_MAX_PRS_RESOURCES_PER_SET 64
 

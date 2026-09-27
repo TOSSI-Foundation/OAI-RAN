@@ -43,6 +43,85 @@
 #include "intertask_interface.h"
 #include "T.h"
 #include "instrumentation.h"
+#include "PHY/NR_UE_ESTIMATION/nr_ue_rxtx.h"
+
+/* LPP DL-PRS assistance data becomes the one PRS resource this UE measures (gNB_id 0, resource 0), replacing
+ * any from the config file. Its start PRB counts from Point A, while the estimator counts from the carrier's
+ * first subcarrier; the two coincide only when Point A is the carrier's lowest subcarrier, which is checked,
+ * as is what the estimator implements (normal CP, comb 2 or 4).
+ * ponytail: applied on this DL thread between slots; with several DL actors a concurrent PRS slot could see a
+ * half-written config once. Hand over per actor if that ever matters. */
+static bool apply_prs_assistance_trp(PHY_VARS_NR_UE *ue, const nr_ue_prs_assistance_t *a, int trp)
+{
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const uint64_t scs_hz = 15000ULL << fp->numerology_index;
+  const uint32_t carrier_point_a = to_nrarfcn(fp->dl_CarrierFreq - (uint64_t)fp->N_RB_DL * 12 * scs_hz / 2);
+  if (a->point_a != (int)carrier_point_a || a->cyclic_prefix_extended || (a->comb != 2 && a->comb != 4)
+      || a->start_prb + a->nof_prbs > fp->N_RB_DL) {
+    LOG_E(PHY,
+          "LPP DL-PRS assistance rejected for TRP %d: point A %d (carrier %u), CP %s, comb %d, PRBs %d+%d of %d\n",
+          trp,
+          a->point_a,
+          carrier_point_a,
+          a->cyclic_prefix_extended ? "extended" : "normal",
+          a->comb,
+          a->start_prb,
+          a->nof_prbs,
+          fp->N_RB_DL);
+    return false;
+  }
+  prs_config_t *c = &ue->prs_vars[trp]->prs_resource[0].prs_cfg;
+  memset(c, 0, sizeof(*c));
+  c->PRSResourceSetPeriod[0] = a->period_slots;
+  /* The UE counts frames on the serving cell's grid. A neighbour TRP's SFN 0 sits nr-DL-PRS-SFN0-Offset
+   * subframes along that grid (37.355 6.4.3), so its occasions do too - the periodicity divides the 10.24 s
+   * SFN cycle, so the offset folds into the slot offset. 15 kHz here: one slot per subframe. */
+  c->PRSResourceSetPeriod[1] = (a->set_slot_offset + a->sfn0_offset_ms) % a->period_slots;
+  c->PRSResourceOffset = a->resource_slot_offset;
+  c->PRSResourceRepetition = a->repetition;
+  c->PRSResourceTimeGap = a->time_gap;
+  c->NumRB = a->nof_prbs;
+  c->RBOffset = a->start_prb;
+  c->CombSize = a->comb;
+  c->REOffset = a->re_offset;
+  c->SymbolStart = a->symbol_offset;
+  c->NumPRSSymbols = a->nof_symbols;
+  c->NPRSID = a->sequence_id;
+  c->MutingBitRepetition = 1;
+  ue->prs_vars[trp]->NumPRSResources = 1;
+  LOG_A(PHY,
+        "LPP DL-PRS assistance applied to TRP %d: dl-PRS-ID %d, period %d offset %d+%d (SFN0 offset %d ms), "
+        "symbols %d..%d, PRBs %d+%d, comb %d/%d, sequence ID %d\n",
+        trp,
+        a->dl_prs_id,
+        a->period_slots,
+        c->PRSResourceSetPeriod[1],
+        a->resource_slot_offset,
+        a->sfn0_offset_ms,
+        a->symbol_offset,
+        a->symbol_offset + a->nof_symbols - 1,
+        a->start_prb,
+        a->nof_prbs,
+        a->comb,
+        a->re_offset,
+        a->sequence_id);
+  return true;
+}
+
+/* The assistance data's whole TRP list, in order: TRP i is measured into prs_vars[i] and reported as the i-th
+ * NR-Multi-RTT-MeasElement-r16. Every TRP must be usable - a half-applied list would pair a measurement with
+ * the wrong satellite at the LMF. */
+static void apply_prs_assistance(PHY_VARS_NR_UE *ue, const nr_ue_prs_assistance_t *a, int n)
+{
+  if (n > NR_MAX_PRS_COMB_SIZE)
+    n = NR_MAX_PRS_COMB_SIZE;
+  for (int trp = 0; trp < n; trp++)
+    if (!apply_prs_assistance_trp(ue, &a[trp], trp))
+      return;
+  ue->prs_active_gNBs = n;
+  nr_ue_prs_assistance_applied(a, n);
+}
+
 
 static const unsigned int gain_table[31] = {100,  112,  126,  141,  158,  178,  200,  224,  251, 282,  316,
                                             359,  398,  447,  501,  562,  631,  708,  794,  891, 1000, 1122,
@@ -1094,6 +1173,11 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
       sampleShift = (sampleShift == INT_MAX) ? pbch_sampleShift : sampleShift;
     }
   }
+
+  nr_ue_prs_assistance_t prs_assist[NR_UE_RXTX_MAX_TRP];
+  const int prs_assist_n = nr_ue_prs_assistance_take(prs_assist, NR_UE_RXTX_MAX_TRP);
+  if (prs_assist_n > 0)
+    apply_prs_assistance(ue, prs_assist, prs_assist_n);
 
   // Check for PRS slot - section 7.4.1.7.4 in 3GPP rel16 38.211
   for(int gNB_id = 0; gNB_id < ue->prs_active_gNBs; gNB_id++)

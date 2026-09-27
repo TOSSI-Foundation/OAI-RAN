@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include "nr_ue_rxtx.h"
 #include "nr_common.h"
 #include <string.h>
 #include "SCHED_NR_UE/defs.h"
@@ -97,8 +98,20 @@ int nr_prs_channel_estimation(uint8_t gNB_id,
   memset(chF_interpol,0,sizeof(chF_interpol));
   memset(chT_interpol,0,sizeof(chF_interpol));
 
-  int slot_prs =
-      (proc->nr_slot_rx - rep_num * prs_cfg->PRSResourceTimeGap + frame_params->slots_per_frame) % frame_params->slots_per_frame;
+  /* The slot this occasion is in AS THE TRANSMITTING TRP COUNTS IT. The PRS sequence is generated from
+   * c_init, which carries the slot number in the frame (TS 38.211 7.4.1.7.2), and the TRP generated it on its
+   * own frame grid. For the serving cell that is also the UE's grid, but a neighbour TRP's SFN 0 sits
+   * nr-DL-PRS-SFN0-Offset subframes away (37.355 6.4.3), so its slot number differs and the sequence with it.
+   * Measured on two satellites 8131 ms apart: the UE searched the right slot with the right comb and RE
+   * offset and correlated against the sequence for ITS slot 6 while the TRP had sent the one for its slot 5 -
+   * no correlation at all, "peak channel power -inf dBm" on every occasion. */
+  const int slots_per_frame = frame_params->slots_per_frame;
+  /* The offset is in subframes; one subframe is slots_per_subframe slots. */
+  int slot_prs = (proc->nr_slot_rx - rep_num * prs_cfg->PRSResourceTimeGap
+                  - nr_ue_prs_sfn0_offset_ms(gNB_id) * (int)frame_params->slots_per_subframe)
+                 % slots_per_frame;
+  if (slot_prs < 0)
+    slot_prs += slots_per_frame;
 
   c16_t mod_prs[NR_MAX_PRS_LENGTH];
   const int16_t *fl, *fm, *fmm, *fml, *fmr, *fr;
@@ -119,7 +132,8 @@ int nr_prs_channel_estimation(uint8_t gNB_id,
   int16_t k_prime_table[K_PRIME_TABLE_ROW_SIZE][K_PRIME_TABLE_COL_SIZE] = PRS_K_PRIME_TABLE;
   for(int l = prs_cfg->SymbolStart; l < prs_cfg->SymbolStart+prs_cfg->NumPRSSymbols; l++)
   {
-    uint32_t *gold_prs = nr_gold_prs(ue->prs_vars[gNB_id]->prs_resource[rsc_id].prs_cfg.NPRSID, slot_prs, l);
+    uint32_t *gold_prs =
+        nr_gold_prs(ue->prs_vars[gNB_id]->prs_resource[rsc_id].prs_cfg.NPRSID, slot_prs, l, frame_params->symbols_per_slot);
     int symInd = l-prs_cfg->SymbolStart;
     if (prs_cfg->CombSize == 2) {
       k_prime = k_prime_table[0][symInd];
@@ -140,9 +154,12 @@ int nr_prs_channel_estimation(uint8_t gNB_id,
     // Pilots generation and modulation
 
     AssertFatal(num_pilots > 0, "num_pilots needs to be gt 0 or mod_prs[0] UB");
-    for (int m = 0; m < num_pilots; m++) 
+    // m counts from Point A, TS 38.211 7.4.1.7.3: the first PRS RE of PRB RBOffset is r(12 RBOffset / K_comb).
+    const int m0 = prs_cfg->RBOffset * 12 / prs_cfg->CombSize;
+    AssertFatal(2 * (m0 + num_pilots) <= 32 * NR_MAX_PRS_INIT_LENGTH_DWORD, "PRS beyond the cached sequence\n");
+    for (int m = 0; m < num_pilots; m++)
     {
-      idx = (((gold_prs[(m << 1) >> 5]) >> ((m << 1) & 0x1f)) & 3);
+      idx = (((gold_prs[((m + m0) << 1) >> 5]) >> (((m + m0) << 1) & 0x1f)) & 3);
       mod_prs[m] = nr_qpsk_mod_table[idx];
     } 
      
@@ -413,6 +430,20 @@ int nr_prs_channel_estimation(uint8_t gNB_id,
     // scale by averaging factor 1/NumPrsSymbols
     mult_complex_vector_real_scalar(ch_tmp, scale_factor, ch_tmp, frame_params->ofdm_symbol_size);
 
+    // The IDFT below sums the estimate coherently over the whole PRS band: a strong PRS (~7000 per RE
+    // over 576 REs gives ~126k) overflows int16, the peak clips and the picker latches onto clipping
+    // artefacts instead of the true delay.
+    int prs_shift = 0;
+    {
+      int64_t sum_mag = 0;
+      for (int i = 0; i < prs_cfg->NumRB * 12; i++)
+        sum_mag += abs(ch_tmp[i].r) + abs(ch_tmp[i].i);
+      while (((sum_mag >> prs_shift) / (int64_t)sqrt(frame_params->ofdm_symbol_size)) > 16384)
+        prs_shift++;
+      for (int i = 0; prs_shift && i < prs_cfg->NumRB * 12; i++)
+        ch_tmp[i] = (c16_t){ch_tmp[i].r >> prs_shift, ch_tmp[i].i >> prs_shift};
+    }
+
 #ifdef DEBUG_PRS_PRINTS
     for (int rb = 0; rb < prs_cfg->NumRB; rb++)
     {
@@ -444,6 +475,7 @@ int nr_prs_channel_estimation(uint8_t gNB_id,
     // adjusting the rx_gains for channel peak power
     ch_pwr_dbm = 10 * log10(ch_pwr) + 30 - SQ15_SQUARED_NORM_FACTOR_DB - ((int)cfg->rx_gain[0] - (int)cfg->rx_gain_offset[0])
                  - dB_fixed(frame_params->ofdm_symbol_size);
+    ch_pwr_dbm += 20 * log10(2) * prs_shift;
 
     prs_meas[rxAnt]->rsrp_dBm = 10 * log10(prs_meas[rxAnt]->rsrp) + 30 - SQ15_SQUARED_NORM_FACTOR_DB
                                 - ((int)cfg->rx_gain[0] - (int)cfg->rx_gain_offset[0]) - dB_fixed(ue->frame_parms.ofdm_symbol_size);
@@ -471,6 +503,18 @@ int nr_prs_channel_estimation(uint8_t gNB_id,
           prs_meas[rxAnt]->rsrp_dBm);
 
     set_prs_dl_toa(prs_meas[rxAnt], dl_toa);
+    if (rxAnt == 0 && ch_pwr > 0) // a detected first path: measure UE Rx-Tx on it
+      nr_ue_rxtx_measure(gNB_id,
+                         (proc->hfn_rx * 1024 + proc->frame_rx) * frame_params->slots_per_frame + proc->nr_slot_rx,
+                         proc->frame_rx,
+                         proc->nr_slot_rx,
+                         frame_params->slots_per_subframe,
+                         frame_params->samples_per_subframe,
+                         dl_toa,
+                         prs_meas[rxAnt]->rsrp_dBm,
+                         frame_params->Nid_cell,
+                         to_nrarfcn(frame_params->dl_CarrierFreq),
+                         ue->N_TA_offset);
 
 #ifdef DEBUG_PRS_CHEST
     sprintf(filename, "%s%i%s", "PRSpilot_", rxAnt, ".m");

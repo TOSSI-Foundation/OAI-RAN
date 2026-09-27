@@ -38,9 +38,11 @@ int nr_generate_prs(int slot, c16_t *txdataF, int16_t amp, prs_config_t *prs_cfg
     k = (prs_cfg->REOffset + k_prime) % prs_cfg->CombSize + prs_cfg->RBOffset * 12;
 
     // QPSK modulation
-    uint32_t *gold = nr_gold_prs(prs_cfg->NPRSID, slot, l);
+    uint32_t *gold = nr_gold_prs(prs_cfg->NPRSID, slot, l, frame_parms->symbols_per_slot);
     for (int m = 0; m < (12/prs_cfg->CombSize) * prs_cfg->NumRB; m++) {
-      idx = (((gold[(m << 1) >> 5]) >> ((m << 1) & 0x1f)) & 3);
+      // m counts from Point A, TS 38.211 7.4.1.7.3: PRB RBOffset starts at r(12 RBOffset / K_comb).
+      const int mm = m + prs_cfg->RBOffset * 12 / prs_cfg->CombSize;
+      idx = (((gold[(mm << 1) >> 5]) >> ((mm << 1) & 0x1f)) & 3);
       mod_prs[m] = nr_qpsk_mod_table[idx];
 
 #ifdef DEBUG_PRS_MAP

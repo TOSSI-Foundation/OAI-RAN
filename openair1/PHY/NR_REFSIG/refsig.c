@@ -117,15 +117,15 @@ uint32_t *nr_gold_csi_rs(int N_RB_DL, int symbols_per_slot, int slot, int symb, 
   return gold_cache(x2, csi_dmrs_init_length);
 }
 
-uint32_t *nr_gold_prs(int Nid, int slotNum, int symNum)
+uint32_t *nr_gold_prs(int Nid, int slotNum, int symNum, int symbols_per_slot)
 {
   LOG_D(PHY, "Initialised NR-PRS sequence for PCI %d\n", Nid);
-  // initial x2 for prs as ts138.211
-  uint32_t pow22 = 1 << 22;
-  uint32_t pow10 = 1 << 10;
-  uint32_t c_init1 = pow22 * ceil(Nid / 1024);
-  uint32_t c_init2 = pow10 * (slotNum + symNum + 1) * (2 * (Nid % 1024) + 1);
-  uint32_t c_init3 = Nid % 1024;
-  uint32_t x2 = c_init1 + c_init2 + c_init3;
+  // TS 38.211 7.4.1.7.2: c_init = (2^22 floor(n_ID/1024) + 2^10 (N_symb^slot n_s,f + l + 1)(2 (n_ID mod
+  // 1024) + 1) + (n_ID mod 1024)) mod 2^31 with n_s,f the slot number in the frame and l the symbol in the
+  // slot.
+  const uint64_t c_init1 = (1ULL << 22) * (uint64_t)(Nid / 1024);
+  const uint64_t c_init2 = (1ULL << 10) * (uint64_t)(symbols_per_slot * slotNum + symNum + 1) * (uint64_t)(2 * (Nid % 1024) + 1);
+  const uint64_t c_init3 = Nid % 1024;
+  const uint32_t x2 = (uint32_t)((c_init1 + c_init2 + c_init3) % (1ULL << 31));
   return gold_cache(x2, NR_MAX_PRS_INIT_LENGTH_DWORD);
 }
