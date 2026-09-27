@@ -7,6 +7,7 @@
  */
 
 #include "nr_nas_msg.h"
+#include "nr_nas_lpp.h"
 #include <netinet/in.h>
 #include "NR_NAS_defs.h"
 #include <openssl/opensslv.h>
@@ -310,6 +311,12 @@ static fgs_nas_msg_t get_msg_type(uint8_t *pdu_buffer, uint32_t length)
   int msg_type = pdu_buffer[9];
 
   if (msg_type == FGS_DOWNLINK_NAS_TRANSPORT) {
+    if (length < 11)
+      goto error;
+    /* Byte 16 is a 5GSM message type only when the payload container type (TS 24.501 9.11.3.40, low nibble
+     * of byte 10) is "N1 SM information"; anything else, e.g. LPP, is dispatched as the transport itself. */
+    if ((pdu_buffer[10] & 0x0f) != FGS_PAYLOAD_CONTAINER_N1_SM_INFORMATION)
+      return FGS_DOWNLINK_NAS_TRANSPORT;
     if (length < 17)
       goto error;
 
@@ -1771,6 +1778,136 @@ static void handle_pdu_session_accept(const nr_ue_nas_t *nas, uint8_t *pdu_buffe
   }
 }
 
+/* Payload container type of a DL NAS TRANSPORT: low nibble of the octet after the message type (TS 24.501
+ * 8.2.11, 9.11.3.40). The header is 7 octets longer when security protected. */
+static int dl_nas_transport_container_type(const uint8_t *pdu, int len)
+{
+  const int base = (len > 1 && pdu[1] != PLAIN_5GS_MSG) ? 7 : 0;
+  return len > base + 3 ? pdu[base + 3] & 0x0f : -1;
+}
+
+/* UL NAS TRANSPORT carrying an LPP message (TS 24.501 5.4.5.2.2): payload container type LPP, the LPP PDU,
+ * and Additional information set to the routing information from the DL (TS 23.273 6.11.1 step 6). No SM IEs
+ * (8.2.10.2-8.2.10.6). Integrity protected and ciphered like every 5GMM message once security is in use
+ * (4.4.4.1), the same way generatePduSessionEstablishRequest() does it. */
+static void generate_ul_nas_transport_lpp(nr_ue_nas_t *nas,
+                                          as_nas_info_t *initialNasMsg,
+                                          uint8_t *lpp,
+                                          int lpp_len,
+                                          const uint8_t *routing,
+                                          int routing_len)
+{
+  int size = 0;
+  nas_stream_cipher_t stream_cipher;
+  uint8_t mac[NAS_INTEGRITY_SIZE];
+
+  fgmm_nas_msg_security_protected_t sp_msg = {0};
+  fgs_nas_message_security_header_t *sp_header = &sp_msg.header;
+  sp_header->protocol_discriminator = FGS_MOBILITY_MANAGEMENT_MESSAGE;
+  sp_header->security_header_type = INTEGRITY_PROTECTED_AND_CIPHERED;
+  sp_header->sequence_number = nas->security.nas_count_ul & 0xff;
+  size += 7;
+
+  fgmm_nas_message_plain_t *plain = &sp_msg.plain;
+  plain->header = set_mm_header(FGS_UPLINK_NAS_TRANSPORT, PLAIN_5GS_MSG);
+  size += sizeof(plain->header);
+
+  fgs_uplink_nas_transport_msg *mm_msg = &plain->mm_msg.uplink_nas_transport;
+  mm_msg->payloadcontainertype.iei = 0;
+  mm_msg->payloadcontainertype.type = FGS_PAYLOAD_CONTAINER_LPP;
+  size += 1;
+  mm_msg->fgspayloadcontainer.payloadcontainercontents.length = lpp_len;
+  mm_msg->fgspayloadcontainer.payloadcontainercontents.value = lpp;
+  size += 2 + lpp_len;
+  mm_msg->additionalinformation.length = routing_len;
+  mm_msg->additionalinformation.value = (uint8_t *)routing;
+  size += 2 + routing_len;
+
+  initialNasMsg->nas_data = malloc_or_fail(size * sizeof(*initialNasMsg->nas_data));
+  int security_header_len = nas_protected_security_header_encode(initialNasMsg->nas_data, sp_header, size);
+  initialNasMsg->length =
+      security_header_len
+      + mm_msg_encode(plain, (uint8_t *)(initialNasMsg->nas_data + security_header_len), size - security_header_len);
+
+  /* ciphering */
+  uint8_t buf[initialNasMsg->length - 7];
+  stream_cipher.context = nas->security_container->ciphering_context;
+  AssertFatal(nas->security.nas_count_ul <= 0xffffff, "fatal: NAS COUNT UL too big (todo: fix that)\n");
+  stream_cipher.count = nas->security.nas_count_ul;
+  stream_cipher.bearer = 1;
+  stream_cipher.direction = 0;
+  stream_cipher.message = (unsigned char *)(initialNasMsg->nas_data + 7);
+  stream_cipher.blength = (initialNasMsg->length - 7) << 3;
+  stream_compute_encrypt(nas->security_container->ciphering_algorithm, &stream_cipher, buf);
+  memcpy(stream_cipher.message, buf, initialNasMsg->length - 7);
+
+  /* integrity protection */
+  stream_cipher.context = nas->security_container->integrity_context;
+  stream_cipher.count = nas->security.nas_count_ul++;
+  stream_cipher.bearer = 1;
+  stream_cipher.direction = 0;
+  stream_cipher.message = (unsigned char *)(initialNasMsg->nas_data + 6);
+  stream_cipher.blength = (initialNasMsg->length - 6) << 3;
+  stream_compute_integrity(nas->security_container->integrity_algorithm, &stream_cipher, mac);
+  for (int i = 0; i < 4; i++)
+    initialNasMsg->nas_data[2 + i] = mac[i];
+}
+
+/* DL NAS TRANSPORT carrying LPP, TS 24.501 5.4.5.3.3 c): hand the payload container and the routing information
+ * in Additional information to the location services application (nr_nas_lpp.c); if it answers, send the
+ * answer back in UL NAS TRANSPORT with that routing information. T3346, which 5.4.5.3.3 stops here, is not
+ * implemented in this UE. */
+static void handle_downlink_nas_transport_lpp(nr_ue_nas_t *nas, const uint8_t *pdu, int len, as_nas_info_t *ul_msg)
+{
+  /* 4.4.4.2: DL NAS TRANSPORT is not among the messages a UE may process without integrity protection. The
+   * integrity check itself already passed in nas_security_rx_process(). */
+  if (len < 2 || pdu[1] == PLAIN_5GS_MSG) {
+    LOG_W(NAS, "DL NAS TRANSPORT (LPP) without integrity protection, discarded\n");
+    return;
+  }
+  const int base = 7;
+  /* [base] EPD, [base+1] security header type, [base+2] message type, [base+3] payload container type,
+   * [base+4..5] payload container length, [base+6..] payload container, then optional IEs (8.2.11) */
+  if (len < base + 6)
+    return;
+  const int clen = (pdu[base + 4] << 8) | pdu[base + 5];
+  const uint8_t *container = pdu + base + 6;
+  if (base + 6 + clen > len)
+    return;
+  const uint8_t *routing = NULL;
+  int routing_len = 0;
+  for (int i = base + 6 + clen; i < len;) {
+    const uint8_t iei = pdu[i];
+    if (iei == 0x12 || iei == 0x58) { /* PDU session ID, 5GMM cause: TV, 2 octets */
+      i += 2;
+    } else if (iei == 0x24 || iei == 0x37 || iei == 0x3A) { /* Additional information, back-off/lower bound timers */
+      if (i + 1 >= len || i + 2 + pdu[i + 1] > len)
+        break;
+      if (iei == 0x24) {
+        routing = pdu + i + 2;
+        routing_len = pdu[i + 1];
+      }
+      i += 2 + pdu[i + 1];
+    } else {
+      LOG_W(NAS, "DL NAS TRANSPORT (LPP): unexpected IEI 0x%02x, rest ignored\n", iei);
+      break;
+    }
+  }
+  /* 8.2.11.3: Additional information is included for LPP; without it the answer cannot be routed back. */
+  if (!routing || routing_len == 0) {
+    LOG_W(NAS, "DL NAS TRANSPORT (LPP) without Additional information, discarded\n");
+    return;
+  }
+  LOG_I(NAS, "DL NAS TRANSPORT (LPP): %d bytes, routing information %d bytes\n", clen, routing_len);
+  uint8_t *ul = NULL;
+  const int ul_len = nr_ue_lpp_handle_dl(container, clen, routing, routing_len, &ul);
+  if (ul_len > 0) {
+    generate_ul_nas_transport_lpp(nas, ul_msg, ul, ul_len, routing, routing_len);
+    LOG_I(NAS, "Send UL NAS TRANSPORT (LPP), %d bytes\n", ul_len);
+  }
+  free(ul);
+}
+
 /**
  * @brief Handle DL NAS Transport and process piggybacked 5GSM messages
  */
@@ -2481,7 +2618,10 @@ void *nas_nrue(void *args_p)
             handle_security_mode_command(nas, &initialNasMsg, pdu_buffer, pdu_length);
             break;
           case FGS_DOWNLINK_NAS_TRANSPORT:
-            handleDownlinkNASTransport(nas, pdu_buffer, pdu_length, nas->UE_id);
+            if (dl_nas_transport_container_type(pdu_buffer, pdu_length) == FGS_PAYLOAD_CONTAINER_LPP)
+              handle_downlink_nas_transport_lpp(nas, pdu_buffer, pdu_length, &initialNasMsg);
+            else
+              handleDownlinkNASTransport(nas, pdu_buffer, pdu_length, nas->UE_id);
             break;
           case FGS_REGISTRATION_ACCEPT:
             handle_registration_accept(nas, pdu_buffer, pdu_length);

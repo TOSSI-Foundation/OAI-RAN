@@ -2,7 +2,7 @@
 
 add_subdirectory(5GS)
 
-add_library(nr_nas STATIC nr_nas_msg.c)
+add_library(nr_nas STATIC nr_nas_msg.c nr_nas_lpp.c)
 
 target_link_libraries(nr_nas PUBLIC asn1_lte_rrc_hdrs asn1_nr_rrc_hdrs)
 target_link_libraries(nr_nas PUBLIC
@@ -14,6 +14,7 @@ target_link_libraries(nr_nas PUBLIC
     nas_utils
     ds
     UTIL
+    asn1_lpp
 )
 
 target_include_directories(nr_nas PUBLIC . 5GS/)

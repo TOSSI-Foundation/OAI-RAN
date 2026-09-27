@@ -100,25 +100,38 @@ int encode_fgs_uplink_nas_transport(const fgs_uplink_nas_transport_msg *fgs_up_n
     encoded += encode_result;
   }
 
-  *(buffer + encoded) = 0x12;
-  encoded++;
+  if (fgs_up_nas_transport->payloadcontainertype.type == FGS_PAYLOAD_CONTAINER_N1_SM_INFORMATION) {
+    *(buffer + encoded) = 0x12;
+    encoded++;
 
-  IES_ENCODE_U8(buffer, encoded, fgs_up_nas_transport->pdusessionid);
+    IES_ENCODE_U8(buffer, encoded, fgs_up_nas_transport->pdusessionid);
 
-  // set request type
-  *(buffer + encoded) = (0x8 << 4) | (fgs_up_nas_transport->requesttype & 0x7);
-  encoded++;
+    // set request type
+    *(buffer + encoded) = (0x8 << 4) | (fgs_up_nas_transport->requesttype & 0x7);
+    encoded++;
 
-  if ((encode_result = encode_nssai(&fgs_up_nas_transport->snssai, 0x22, buffer + encoded)) < 0) {
-    return encode_result;
-  } else {
-    encoded += encode_result;
+    if ((encode_result = encode_nssai(&fgs_up_nas_transport->snssai, 0x22, buffer + encoded)) < 0) {
+      return encode_result;
+    } else {
+      encoded += encode_result;
+    }
+
+    if ((encode_result = encode_dnn(&fgs_up_nas_transport->dnn, 0x25, buffer + encoded)) < 0) {
+      return encode_result;
+    } else {
+      encoded += encode_result;
+    }
   }
 
-  if ((encode_result = encode_dnn(&fgs_up_nas_transport->dnn, 0x25, buffer + encoded)) < 0) {
-    return encode_result;
-  } else {
-    encoded += encode_result;
+  // Additional information: type 4 TLV, value 1..255 octets (TS 24.501 9.11.2.1).
+  const OctetString *ai = &fgs_up_nas_transport->additionalinformation;
+  if (ai->length > 0) {
+    if (ai->length > 255 || len < (uint32_t)(encoded + 2 + ai->length))
+      return -1;
+    buffer[encoded++] = 0x24;
+    buffer[encoded++] = ai->length;
+    memcpy(buffer + encoded, ai->value, ai->length);
+    encoded += ai->length;
   }
 
   return encoded;

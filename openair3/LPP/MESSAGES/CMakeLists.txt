@@ -6,7 +6,9 @@
 #string(REPLACE ";" "." LPP_RELEASE "${LPP_VERSION}")
 
 #if(LPP_RELEASE VERSION_EQUAL "16.78.0")
-include(ASN1/37355-g60.cmake)
+# Rel-18 (TS 37.355 v18.7.0): carries NR-NTN-UE-RxTxMeasurements-r18, which NTN Multi-RTT needs. Extracted
+# from the official 37355-i70.docx ASN1START/ASN1STOP blocks; 37355-i70.cmake lists what asn1c emits for it.
+include(ASN1/37355-i70.cmake)
 #else()
 #  message(FATAL_ERROR "unknown LPP_RELEASE ${LPP_RELEASE}")
 #endif()
